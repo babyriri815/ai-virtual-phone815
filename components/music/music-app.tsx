@@ -13,7 +13,8 @@ import {
     isNeteaseConfigured, loadMusicApiConfig, saveMusicApiConfig,
     searchNetease, getNeteasePlayUrl, getNeteaseLyrics, getNeteaseSongDetail,
     testNeteaseConnection, getQrKey, getQrImage, checkQrStatus, checkLoginStatus,
-    getUserPlaylists, getPlaylistTracks, saveNeteaseCookie, clearNeteaseCookie,
+    getUserPlaylists, getPlaylistTracks, saveNeteaseCookie, loadNeteaseCookie,
+    clearNeteaseCookie, normalizeNeteaseMusicU,
     getDailyRecommendSongs, getHotSearchDetail, getPersonalizedPlaylists,
     getRecommendResource, getToplists, getUserRecord,
     type NeteaseHotSearch, type NeteaseSearchResult,
@@ -906,6 +907,9 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
     const [qrStatus, setQrStatus] = useState<string>("");
     const [qrPolling, setQrPolling] = useState(false);
     const [loginNickname, setLoginNickname] = useState<string | null>(null);
+    const [manualMusicU, setManualMusicU] = useState("");
+    const [manualLoginStatus, setManualLoginStatus] = useState("");
+    const [manualLoginBusy, setManualLoginBusy] = useState(false);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     // Check login status on mount when API is configured
@@ -982,12 +986,51 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
         }, 2000);
     };
 
+    const handleManualMusicULogin = async () => {
+        const base = config.baseUrl.trim();
+        if (!base) return;
+
+        const normalizedCookie = normalizeNeteaseMusicU(manualMusicU);
+        if (!normalizedCookie) {
+            setManualLoginStatus("格式不正确：请粘贴 MUSIC_U 的 Value，或 MUSIC_U=...。");
+            return;
+        }
+
+        setManualLoginBusy(true);
+        setManualLoginStatus("正在验证登录状态...");
+        const previousCookie = loadNeteaseCookie();
+        saveNeteaseCookie(normalizedCookie);
+
+        try {
+            const status = await checkLoginStatus(base);
+            if (!status.loggedIn) {
+                if (previousCookie) saveNeteaseCookie(previousCookie);
+                else clearNeteaseCookie();
+                setManualLoginStatus("验证失败：MUSIC_U 已失效、复制不完整，或网易暂时拒绝请求。");
+                return;
+            }
+
+            const nextConfig = { ...config, baseUrl: base, enabled: true };
+            saveMusicApiConfig(nextConfig);
+            setConfig(nextConfig);
+            setManualMusicU("");
+            setManualLoginStatus("验证成功，已载入你的网易云账号。");
+            setLoginNickname(status.nickname || "已登录");
+            clearMusicCloudSyncData();
+            onSaved();
+        } finally {
+            setManualLoginBusy(false);
+        }
+    };
+
     const handleLogout = () => {
         if (pollRef.current) clearInterval(pollRef.current);
         setQrPolling(false);
         setQrImg(null);
         setQrKey(null);
         setQrStatus("");
+        setManualMusicU("");
+        setManualLoginStatus("");
         setLoginNickname(null);
         clearNeteaseCookie();
         clearMusicCloudSyncData();
@@ -1058,6 +1101,38 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                                         <img src={qrImg} alt="QR Code" className="music-qr-img" />
                                     </div>
                                 )}
+
+                                <div className="music-settings-section" style={{ marginTop: 16 }}>
+                                    <div className="music-settings-label">Vercel 扫码被风控？手动导入 MUSIC_U</div>
+                                    <div className="music-settings-hint">
+                                        先在 music.163.com 登录，打开浏览器开发者工具的 Cookies，
+                                        复制 MUSIC_U 的 Value。凭证只保存在当前设备，不进入备份或同步。
+                                    </div>
+                                    <input
+                                        className="music-settings-input"
+                                        type="password"
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                        placeholder="粘贴 MUSIC_U 的 Value，或 MUSIC_U=..."
+                                        value={manualMusicU}
+                                        onChange={(e) => {
+                                            setManualMusicU(e.target.value);
+                                            setManualLoginStatus("");
+                                        }}
+                                    />
+                                    <div className="music-settings-actions" style={{ marginTop: 8 }}>
+                                        <button
+                                            className="music-settings-btn music-settings-btn-primary"
+                                            onClick={handleManualMusicULogin}
+                                            disabled={manualLoginBusy || !manualMusicU.trim()}
+                                        >
+                                            {manualLoginBusy ? "验证中..." : "验证并登录"}
+                                        </button>
+                                    </div>
+                                    {manualLoginStatus && (
+                                        <div className="music-qr-status">{manualLoginStatus}</div>
+                                    )}
+                                </div>
                             </>
                         )}
 
