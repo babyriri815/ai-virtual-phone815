@@ -25,6 +25,7 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - FishAudio: same-origin relay → Fish Audio binary mp3
  */
 export async function synthesizeSpeech(
     text: string,
@@ -41,6 +42,10 @@ export async function synthesizeSpeech(
 
     if (provider === "OpenAI") {
         return synthesizeOpenAI(text, voiceConfig);
+    }
+
+    if (provider === "FishAudio") {
+        return synthesizeFishAudio(text, voiceConfig);
     }
 
     return null;
@@ -157,6 +162,41 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
 
     const blob = await response.blob();
     return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── Fish Audio TTS ──────────────────────────────────
+
+async function synthesizeFishAudio(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey.trim()) throw new Error("Fish Audio API Key 未配置");
+    if (!config.defaultVoice.trim()) throw new Error("Fish Audio reference_id 未配置");
+
+    // Always call the same-origin route. The phone browser never contacts Fish
+    // directly, so mobile CORS restrictions cannot block synthesis. The route
+    // only forwards this request-scoped key and never persists or logs it.
+    const response = await fetchWithTimeout("/api/voice/fish-tts", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Fish-Audio-Key": config.apiKey.trim(),
+        },
+        body: JSON.stringify({
+            text,
+            referenceId: config.defaultVoice.trim(),
+            model: config.model?.trim() || "s2.1-pro-free",
+            latency: "balanced",
+        }),
+    }, 60_000);
+
+    if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { message?: string } | null;
+        throw new Error(payload?.message || `Fish Audio TTS 请求失败 (${response.status})`);
+    }
+
+    const blob = await response.blob();
+    if (blob.size === 0) throw new Error("Fish Audio 未返回音频数据");
+    return new Blob([await blob.arrayBuffer()], {
+        type: blob.type || "audio/mpeg",
+    });
 }
 
 // ── iOS audio playback that coexists with speech recognition ──────────
