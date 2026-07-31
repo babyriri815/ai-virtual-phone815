@@ -46,6 +46,36 @@ function mergePrompt(description: string, extraPrompt: string): string {
   return extra ? `${main}\n\n${extra}` : main;
 }
 
+const REFERENCE_IDENTITY_LOCK = [
+  "【角色身份锁定（最高优先级）】",
+  "输入参考图中的人物就是本次画面的同一个角色，不是仅供参考的相似人物或风格样本。",
+  "严格保留其身份、性别、脸型、五官比例、眼睛颜色、肤色、发色、发型、刘海、发长及其他可辨识特征；不得换脸、重设计或改成更常见的长相。",
+  "只改变本次描述明确要求的场景、构图、动作、表情与服装；未要求改变的角色外观保持不变。",
+].join("\n");
+
+const NO_PERSON_SCENE_LOCK = [
+  "【无人场景锁定（最高优先级）】",
+  "本次主画面只描述环境或物品，画面中不得出现任何人物、角色、人形、脸、身体、手、背影或倒影，也不得在镜子、照片、海报、显示器或电视内容中添加人物。",
+  "通用风格提示里关于角色建模、皮肤、眼睛、虹膜、毛孔、面部绒毛、头发和五官的描述仅在主提示明确要求人物时生效；本次必须全部忽略。",
+  "只生成主描述要求的环境、设备和物品，不得为了构图自行添加人物主体。",
+].join("\n");
+
+const PERSON_INTENT_PATTERN = /(?:人物|角色|人像|真人|人类|男人|女人|男性|女性|男生|女生|男孩|女孩|少年|少女|青年|老人|臉|脸|面孔|五官|眼睛|眼眸|頭髮|头发|髮絲|发丝|手臂|雙手|双手|背影|身影|全身|半身|自拍|合照|肖像|portrait|selfie|person|people|human|man|woman|boy|girl|character|face|eyes?|hair|hands?|body|silhouette)/i;
+
+export function imageDescriptionRequestsPerson(description: string): boolean {
+  return PERSON_INTENT_PATTERN.test(description);
+}
+
+function withReferenceIdentityLock(prompt: string, hasReference: boolean): string {
+  return hasReference ? `${REFERENCE_IDENTITY_LOCK}\n\n${prompt}` : prompt;
+}
+
+export function hasConfiguredCharacterReference(characterId: string | undefined): boolean {
+  if (!characterId) return false;
+  const reference = loadImageGenerationSettings().characterReferences[characterId];
+  return Boolean(reference?.assetId);
+}
+
 function base64ToBlob(b64: string, mimeType: string): Blob {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
@@ -334,7 +364,10 @@ async function generateImageDirect(params: {
     form.set("prompt", prompt);
     if (settings.size && settings.size !== "auto") form.set("size", settings.size);
     if (settings.quality && settings.quality !== "auto") form.set("quality", settings.quality);
-    form.append("image", converted.blob, `reference.${imageExtension(converted.mimeType)}`);
+    // GPT Image's current multipart contract models image inputs as an array.
+    // Using image[] also avoids relays silently treating a single `image` field
+    // as an unsupported legacy edit and falling back to text-only generation.
+    form.append("image[]", converted.blob, `reference.${imageExtension(converted.mimeType)}`);
     body = form;
   } else {
     headers["Content-Type"] = "application/json";
@@ -400,11 +433,12 @@ async function generateImageViaServer(params: {
   const { settings, prompt, referenceImageDataUrl, signal } = params;
   throwIfAborted(signal);
   // 防"无限卡住":函数被平台中途击杀时流可能既不关闭也不报错。
-  // 总超时 180s + 断流检测(心跳每 3s 一个字节,超过 25s 没有任何字节视为断流)。
+  // 上游 gpt-image-2 单张可能需要 3~5 分钟；服务端允许 360s，
+  // 浏览器多留 60s 给结果传输。断流仍由 25s 心跳检测负责。
   const controller = new AbortController();
   const onOuterAbort = () => controller.abort();
   if (signal) signal.addEventListener("abort", onOuterAbort, { once: true });
-  const totalTimer = setTimeout(() => controller.abort(), 180_000);
+  const totalTimer = setTimeout(() => controller.abort(), 420_000);
   try {
     // x-stream-heartbeat:服务端以心跳流响应,真正的结果附在流末尾的 @@RESULT@@ 标记后。
     // 避免托管平台对缓冲响应的 10~26s 超时把慢生图(30~120s)掐成 504。
@@ -473,6 +507,11 @@ async function generateImageViaServer(params: {
       }
     }
     return { b64: data.b64, mimeType: data.mimeType, revisedPrompt: data.revisedPrompt };
+  } catch (error) {
+    if (controller.signal.aborted && !signal?.aborted) {
+      throw new Error("生图请求超时（等待 420 秒仍未完成）");
+    }
+    throw error;
   } finally {
     clearTimeout(totalTimer);
     if (signal) signal.removeEventListener("abort", onOuterAbort);
@@ -492,16 +531,31 @@ export async function generateImageFromConfiguredApi(params: {
   const description = params.description.trim();
   if (!description || !settings.apiKey.trim() || !settings.baseUrl.trim() || !settings.model.trim()) return null;
 
+  const requestsPerson = imageDescriptionRequestsPerson(description);
   const reference = params.characterId ? settings.characterReferences[params.characterId] : undefined;
-  const rawReferenceImageDataUrl = params.useReferenceImage && reference?.assetId
-    ? await getChatImageFromIndexedDB(reference.assetId)
+  const referenceAssetId = reference?.assetId;
+  const requestedConfiguredReference = Boolean(
+    requestsPerson && params.useReferenceImage && referenceAssetId
+  );
+  const rawReferenceImageDataUrl = requestedConfiguredReference && referenceAssetId
+    ? await getChatImageFromIndexedDB(referenceAssetId)
     : null;
+  if (requestedConfiguredReference && !rawReferenceImageDataUrl) {
+    throw new Error("角色参考图文件不存在，已阻止无参考图生图；请重新上传该角色参考图");
+  }
   throwIfAborted(params.signal);
   const referenceImageDataUrl = rawReferenceImageDataUrl
     ? await normalizeReferenceImageForEdit(rawReferenceImageDataUrl)
     : null;
   throwIfAborted(params.signal);
-  const prompt = mergePrompt(description, settings.extraPrompt);
+  // Apply the lock before routing so both "direct" and "server forwarding"
+  // modes receive the same identity-preserving prompt.
+  const mergedPrompt = mergePrompt(description, settings.extraPrompt);
+  const prompt = referenceImageDataUrl
+    ? withReferenceIdentityLock(mergedPrompt, true)
+    : requestsPerson
+      ? mergedPrompt
+      : `${NO_PERSON_SCENE_LOCK}\n\n${mergedPrompt}\n\n【再次确认】画面中不得出现任何人物或人体部分。`;
 
   const data = settings.requestMode === "direct"
     ? await generateImageDirect({ settings, prompt, referenceImageDataUrl, signal: params.signal })

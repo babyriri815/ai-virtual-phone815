@@ -142,7 +142,8 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
       form.set("prompt", prompt);
       if (input.size && input.size !== "auto") form.set("size", input.size);
       if (input.quality && input.quality !== "auto") form.set("quality", input.quality);
-      form.append("image", converted.blob, `reference.${converted.mimeType.split("/")[1] || "png"}`);
+      // GPT Image 2 documents edit inputs as the multipart image[] array.
+      form.append("image[]", converted.blob, `reference.${converted.mimeType.split("/")[1] || "png"}`);
       body = form;
     } else {
       headers["Content-Type"] = "application/json";
@@ -155,7 +156,9 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000);
+    // gpt-image-2 and compatible relays can legitimately take 3~5 minutes.
+    // The previous 120s limit aborted paid generations before they returned.
+    const timeout = setTimeout(() => controller.abort(), 360_000);
     let res: Response;
     try {
       res = await externalFetch(url, { method: "POST", headers, body, signal: controller.signal });
@@ -195,8 +198,16 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const status = message.toLowerCase().includes("abort") ? 504 : 502;
-    return { status, body: { error: message } };
+    const aborted = message.toLowerCase().includes("abort");
+    const status = aborted ? 504 : 502;
+    return {
+      status,
+      body: {
+        error: aborted
+          ? "生图 API 超时（等待 360 秒仍未返回）"
+          : message,
+      },
+    };
   }
 }
 

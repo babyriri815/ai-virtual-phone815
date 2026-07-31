@@ -153,11 +153,14 @@ const RICH_PATTERNS: {
         }),
     },
     {
-        regex: new RegExp(`\\[照片${C}(使用参考图|不使用参考图)${C}([^\\]]+)\\]`),
+        regex: new RegExp(`\\[照片${C}(使用参考图|不使用参考图|使用參考圖|不使用參考圖)${C}([^\\]]+)\\]`),
         build: (m) => ({
             content: "",
             mediaType: "image",
-            mediaData: { label: m[2].trim(), useReferenceImage: m[1] === "使用参考图" },
+            mediaData: {
+                label: m[2].trim(),
+                useReferenceImage: m[1] === "使用参考图" || m[1] === "使用參考圖",
+            },
         }),
     },
     {

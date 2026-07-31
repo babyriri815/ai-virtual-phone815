@@ -1,6 +1,11 @@
 import { saveChatImageToIndexedDB } from "./chat-asset-storage";
 import { syncChatGeneratedImagePromptText, updateChatMessage, type ChatMessage } from "./chat-storage";
-import { generatedImageFilename, generateImageFromConfiguredApi } from "./image-generation-service";
+import {
+    generatedImageFilename,
+    generateImageFromConfiguredApi,
+    hasConfiguredCharacterReference,
+    imageDescriptionRequestsPerson,
+} from "./image-generation-service";
 import { updateMomentPost } from "./moments-storage";
 import type { MomentPost } from "./moments-types";
 
@@ -50,10 +55,13 @@ export async function generateAndApplyChatGeneratedImage(
     }
 
     try {
+        const useReferenceImage = imageDescriptionRequestsPerson(description)
+            && (message.mediaData?.useReferenceImage === true
+                || hasConfiguredCharacterReference(characterId));
         const generated = await generateImageFromConfiguredApi({
             description,
             characterId,
-            useReferenceImage: message.mediaData?.useReferenceImage === true,
+            useReferenceImage,
             signal: options?.signal,
         });
         if (!generated) throw new Error("生图配置未启用或不完整");
@@ -107,10 +115,12 @@ export async function retryMomentGeneratedPhoto(post: MomentPost, nextDescriptio
     if (!description) throw new Error("缺少图片描述，无法重新生成");
 
     try {
+        const characterId = post.authorType === "character" ? post.authorId : undefined;
         const generated = await generateImageFromConfiguredApi({
             description,
-            characterId: post.authorType === "character" ? post.authorId : undefined,
-            useReferenceImage: post.photoUseReferenceImage === true,
+            characterId,
+            useReferenceImage: post.photoUseReferenceImage === true
+                || hasConfiguredCharacterReference(characterId),
         });
         if (!generated) throw new Error("生图配置未启用或不完整");
 
@@ -120,6 +130,7 @@ export async function retryMomentGeneratedPhoto(post: MomentPost, nextDescriptio
             photoDescription: description,
             photoGenerationStatus: "generated",
             photoGenerationPrompt: generated.prompt,
+            photoUseReferenceImage: generated.usedReferenceImage,
             photoGenerationError: undefined,
         });
         if (!updated) throw new Error("原朋友圈不存在，无法替换图片");
