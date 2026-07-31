@@ -52,7 +52,11 @@ import { bgSetInterval } from "./bg-timer";
 import { sendBrowserNotification } from "./browser-notification";
 import { buildTwoLevelMomentThreads } from "./moments-comment-threading";
 import { DEFAULT_MOMENTS_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./bilingual-prompt-defaults";
-import { generateImageFromConfiguredApi } from "./image-generation-service";
+import {
+    generateImageFromConfiguredApi,
+    hasConfiguredCharacterReference,
+    imageDescriptionRequestsPerson,
+} from "./image-generation-service";
 import { isAbortError, throwIfAborted } from "./abort-utils";
 import { getChatImageFromIndexedDB, saveChatImageToIndexedDB } from "./chat-asset-storage";
 import {
@@ -346,23 +350,27 @@ async function triggerAIPost(characterId: string): Promise<void> {
         const contacts = loadChatContacts();
         const visibility = contacts.map(c => c.characterId);
 
-        // 先入库再生图：帖子立即可见，生图慢/超时/页面被杀都不会丢帖
+        // Character references are configured by the user and therefore outrank
+        // the model-generated "不使用参考图" directive.
+        const useReferenceImage = Boolean(
+            parsed.photoDescription
+            && imageDescriptionRequestsPerson(parsed.photoDescription)
+            && (
+                parsed.photoUseReferenceImage === true
+                || hasConfiguredCharacterReference(characterId)
+            )
+        );
         const post = addMomentPost({
             authorType: "character",
             authorId: characterId,
             content: parsed.content,
             photoDescription: parsed.photoDescription,
-            photoUseReferenceImage: parsed.photoUseReferenceImage === true,
-            photoGenerationStatus: parsed.photoDescription ? "pending" : undefined,
+            photoUseReferenceImage: useReferenceImage,
             visibility,
         });
         if (!post) {
             console.warn(`[Moments] SKIP duplicate AI post from ${character.name}`);
             return;
-        }
-
-        if (parsed.photoDescription) {
-            attachMomentPhotoInBackground(post.id, parsed.photoDescription, characterId, parsed.photoUseReferenceImage === true);
         }
 
         // Increment event counter for auto-summarization (native data read at summarization time)
@@ -373,6 +381,29 @@ async function triggerAIPost(characterId: string): Promise<void> {
         dispatchMomentsUpdated();
         // Character's post → NPC reactions (not other main characters)
         generateNPCReactions(post, character);
+
+        // Save the post before starting optional image generation. This keeps the
+        // text visible even when a newly changed face/reference cannot be fetched.
+        if (parsed.photoDescription) {
+            void generateMomentPhotoUrl(
+                parsed.photoDescription,
+                characterId,
+                useReferenceImage,
+            ).then(photoUrl => {
+                updateMomentPost(post.id, {
+                    photoUrl,
+                    photoGenerationStatus: photoUrl ? "generated" : "failed",
+                    photoGenerationError: photoUrl ? undefined : "生图配置未启用或生成失败",
+                });
+                dispatchMomentsUpdated();
+            }).catch(error => {
+                updateMomentPost(post.id, {
+                    photoGenerationStatus: "failed",
+                    photoGenerationError: error instanceof Error ? error.message : String(error),
+                });
+                dispatchMomentsUpdated();
+            });
+        }
 
     } finally {
         isGenerating = false;
@@ -1153,15 +1184,24 @@ export function parseMomentPostResponse(rawText: string): {
     const blockMatch = rawText.match(/\[朋友圈\]\s*([\s\S]*?)\s*\[\/朋友圈\]/);
     const text = blockMatch ? blockMatch[1] : rawText;
 
-    const explicitPhotoMatch = text.match(/\[照片[:：]\s*(使用参考图|不使用参考图)\s*[:：]\s*([\s\S]*?)\]/);
-    const legacyPhotoMatch = explicitPhotoMatch ? null : text.match(/\[照片[:：]\s*([\s\S]*?)\]/);
+    const explicitPhotoMatch = text.match(
+        /\[照片[:：]\s*(使用(?:参考图|參考圖)|不使用(?:参考图|參考圖))\s*[:：]\s*([\s\S]*?)\]/
+    );
+    const legacyPhotoMatch = explicitPhotoMatch
+        ? null
+        : text.match(/\[照片[:：]\s*([\s\S]*?)\]/);
     const photoDescription = explicitPhotoMatch
         ? explicitPhotoMatch[2].trim()
-        : legacyPhotoMatch ? legacyPhotoMatch[1].trim() : undefined;
-    const photoUseReferenceImage = explicitPhotoMatch ? explicitPhotoMatch[1] === "使用参考图" : false;
+        : legacyPhotoMatch
+            ? legacyPhotoMatch[1].trim()
+            : undefined;
+    const referenceDirective = explicitPhotoMatch?.[1] ?? "";
+    const photoUseReferenceImage = explicitPhotoMatch
+        ? !referenceDirective.startsWith("不使用")
+        : false;
 
     const content = text
-        .replace(/\[照片[:：]\s*(?:使用参考图|不使用参考图)\s*[:：]\s*[\s\S]*?\]/g, "")
+        .replace(/\[照片[:：]\s*(?:使用|不使用)(?:参考图|參考圖)\s*[:：]\s*[\s\S]*?\]/g, "")
         .replace(/\[照片[:：]\s*[\s\S]*?\]/g, "")
         .replace(/\[朋友圈\]|\[\/朋友圈\]/g, "")
         .trim();
@@ -1172,32 +1212,6 @@ export function parseMomentPostResponse(rawText: string): {
 }
 
 // ── Helpers ──
-
-/**
- * 生图后台任务：帖子已先入库（photoGenerationStatus: "pending"），图片生成完再补挂。
- * 失败/超时/中断只把状态标为 failed（卡片上可手动重试），绝不影响帖子本身。
- */
-export function attachMomentPhotoInBackground(
-    postId: string,
-    description: string,
-    characterId: string,
-    useReferenceImage: boolean,
-    signal?: AbortSignal,
-): void {
-    void (async () => {
-        let photoUrl: string | undefined;
-        let errorMessage: string | undefined;
-        try {
-            photoUrl = await generateMomentPhotoUrl(description, characterId, useReferenceImage, signal);
-        } catch (error) {
-            errorMessage = error instanceof Error ? error.message : String(error);
-        }
-        updateMomentPost(postId, photoUrl
-            ? { photoUrl, photoGenerationStatus: "generated", photoGenerationError: undefined }
-            : { photoGenerationStatus: "failed", photoGenerationError: errorMessage || "生图配置未启用或生成失败" });
-        dispatchMomentsUpdated();
-    })();
-}
 
 export async function generateMomentPhotoUrl(
     description: string,

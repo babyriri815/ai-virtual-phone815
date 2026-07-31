@@ -308,6 +308,9 @@ export function SystemInstructionModal({ onSend, onClose }: SystemInstructionMod
                         style={{ resize: "vertical" }}
                     />
                 </label>
+                <div className="ts-12 text-[var(--c-text-muted)] leading-relaxed">
+                    指令会加入下一轮对话上下文；注入后，请点击输入栏最右侧的 ✨ 让 AI 生成回复。
+                </div>
                 <div className="flex gap-3 w-full">
                     <button onClick={onClose} className="ui-btn ui-btn-ghost ui-btn-bordered-ghost flex-1">取消</button>
                     <button

@@ -5,6 +5,7 @@
 
 import {
     addMomentPost,
+    updateMomentPost,
     addMomentComment,
     addPendingReaction,
     findRecentDuplicateMomentPost,
@@ -18,7 +19,11 @@ import { loadCharacters } from "./character-storage";
 import { clearRequestsForCharacter, dispatchFriendRequestUpdated } from "./friend-request-storage";
 import { sendBrowserNotification } from "./browser-notification";
 import type { MomentPost, MomentComment } from "./moments-types";
-import { attachMomentPhotoInBackground, parseMomentPostResponse } from "./moments-engine";
+import { generateMomentPhotoUrl, parseMomentPostResponse } from "./moments-engine";
+import {
+    hasConfiguredCharacterReference,
+    imageDescriptionRequestsPerson,
+} from "./image-generation-service";
 import { isAbortError, throwIfAborted } from "./abort-utils";
 
 // ── Types ──
@@ -309,14 +314,22 @@ async function dispatchMomentsPost(action: ActionTag, context: ActionContext): P
     const contacts = loadChatContacts();
     const visibility = contacts.map(c => c.characterId);
 
-    // 先入库再生图：帖子立即可见，生图慢/超时/页面被杀都不会丢帖
+    // A configured character identity is a user-level choice. The language model
+    // must not be able to disable it by emitting "不使用参考图".
+    const useReferenceImage = Boolean(
+        parsed.photoDescription
+        && imageDescriptionRequestsPerson(parsed.photoDescription)
+        && (
+            parsed.photoUseReferenceImage === true
+            || hasConfiguredCharacterReference(context.characterId)
+        )
+    );
     const post = addMomentPost({
         authorType: "character",
         authorId: context.characterId,
         content: parsed.content,
         photoDescription: parsed.photoDescription,
-        photoUseReferenceImage: parsed.photoUseReferenceImage === true,
-        photoGenerationStatus: parsed.photoDescription ? "pending" : undefined,
+        photoUseReferenceImage: useReferenceImage,
         visibility,
     });
     if (!post) {
@@ -324,12 +337,31 @@ async function dispatchMomentsPost(action: ActionTag, context: ActionContext): P
         return;
     }
 
-    if (parsed.photoDescription) {
-        attachMomentPhotoInBackground(post.id, parsed.photoDescription, context.characterId, parsed.photoUseReferenceImage === true, context.signal);
-    }
-
     console.log(`[ActionParser] Created moments post from ${context.sourceEngine} engine`);
     dispatchMomentsUpdated();
+
+    // Publish text immediately. A bad character-reference image must only fail
+    // the optional photo, not silently discard the entire Moments post.
+    if (parsed.photoDescription) {
+        void generateMomentPhotoUrl(
+            parsed.photoDescription,
+            context.characterId,
+            useReferenceImage,
+        ).then(photoUrl => {
+            updateMomentPost(post.id, {
+                photoUrl,
+                photoGenerationStatus: photoUrl ? "generated" : "failed",
+                photoGenerationError: photoUrl ? undefined : "生图配置未启用或生成失败",
+            });
+            dispatchMomentsUpdated();
+        }).catch(error => {
+            updateMomentPost(post.id, {
+                photoGenerationStatus: "failed",
+                photoGenerationError: error instanceof Error ? error.message : String(error),
+            });
+            dispatchMomentsUpdated();
+        });
+    }
 
     // Trigger NPC reactions (same as moments-engine flow)
     const cfg = loadMomentsConfig();
