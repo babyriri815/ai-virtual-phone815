@@ -72,20 +72,46 @@ export function clearNeteaseCookie(): void {
     try { kvRemove(NETEASE_COOKIE_KEY); } catch { /* ignore */ }
 }
 
-/** Append saved cookie and mainland realIP to a Netease API URL as query parameters. */
-function withNeteaseParams(url: string): string {
+/**
+ * Accept either the raw MUSIC_U value, `MUSIC_U=value`, or a copied cookie
+ * string. Only MUSIC_U is retained; unrelated browser cookies are discarded.
+ */
+export function normalizeNeteaseMusicU(input: string): string | null {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+
+    const match = trimmed.match(/(?:^|;\s*)MUSIC_U\s*=\s*([^;]+)/i);
+    const token = (match?.[1] || (!/[;\s]/.test(trimmed) ? trimmed : "")).trim();
+    if (!token || token.length < 16 || token.length > 4096 || /\s/.test(token)) return null;
+    return `MUSIC_U=${token}`;
+}
+
+/**
+ * Keep authenticated Netease requests out of URL history and Vercel request
+ * URLs. NeteaseCloudMusicApi accepts the same parameters in a JSON POST body.
+ * Anonymous requests remain GETs so QR generation behaviour stays unchanged.
+ */
+async function fetchNetease(url: string, init?: RequestInit): Promise<Response> {
     const cookie = loadNeteaseCookie();
     try {
         const parsed = new URL(url);
         if (!parsed.searchParams.has("realIP")) parsed.searchParams.set("realIP", NETEASE_REAL_IP);
-        if (cookie && !parsed.searchParams.has("cookie")) parsed.searchParams.set("cookie", cookie);
-        return parsed.toString();
+        if (!cookie) return fetch(parsed.toString(), init);
+
+        const parameters = Object.fromEntries(parsed.searchParams.entries());
+        parsed.search = "";
+        const headers = new Headers(init?.headers);
+        headers.set("Content-Type", "application/json");
+        return fetch(parsed.toString(), {
+            ...init,
+            method: "POST",
+            headers,
+            body: JSON.stringify({ ...parameters, cookie }),
+        });
     } catch {
-        const params: string[] = [];
-        if (!/[?&]realIP=/.test(url)) params.push(`realIP=${encodeURIComponent(NETEASE_REAL_IP)}`);
-        if (cookie && !/[?&]cookie=/.test(url)) params.push(`cookie=${encodeURIComponent(cookie)}`);
-        if (params.length === 0) return url;
-        return `${url}${url.includes("?") ? "&" : "?"}${params.join("&")}`;
+        // Config validation rejects malformed URLs elsewhere. Fall back to a
+        // credential-free request rather than exposing MUSIC_U in a URL.
+        return fetch(url, init);
     }
 }
 
@@ -168,7 +194,7 @@ export async function searchNetease(query: string, limit = 20): Promise<NeteaseS
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/cloudsearch?keywords=${encodeURIComponent(query)}&limit=${limit}`));
+        const resp = await fetchNetease(`${base}/cloudsearch?keywords=${encodeURIComponent(query)}&limit=${limit}`);
         const data = await resp.json();
         const songs = data?.result?.songs;
         if (!Array.isArray(songs)) return [];
@@ -184,7 +210,7 @@ export async function getNeteasePlayUrl(songId: number): Promise<string | null> 
     const base = neteaseBase();
     if (!base) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/song/url?id=${songId}`));
+        const resp = await fetchNetease(`${base}/song/url?id=${songId}`);
         const data = await resp.json();
         const url = data?.data?.[0]?.url;
         if (!url || typeof url !== "string") return null;
@@ -202,7 +228,7 @@ export async function getNeteaseLyrics(songId: number): Promise<string> {
     const base = neteaseBase();
     if (!base) return "";
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/lyric?id=${songId}`));
+        const resp = await fetchNetease(`${base}/lyric?id=${songId}`);
         const data = await resp.json();
         return data?.lrc?.lyric || "";
     } catch {
@@ -215,7 +241,7 @@ export async function getNeteaseSongDetail(songId: number): Promise<{ coverUrl?:
     const base = neteaseBase();
     if (!base) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/song/detail?ids=${songId}`));
+        const resp = await fetchNetease(`${base}/song/detail?ids=${songId}`);
         const data = await resp.json();
         const song = data?.songs?.[0];
         if (!song) return null;
@@ -234,7 +260,7 @@ export async function getNeteaseSongDetail(songId: number): Promise<{ coverUrl?:
 export async function getQrKey(baseUrl: string): Promise<string | null> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/qr/key?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${url}/login/qr/key?timestamp=${Date.now()}`);
         const data = await resp.json();
         return data?.data?.unikey || null;
     } catch { return null; }
@@ -243,7 +269,7 @@ export async function getQrKey(baseUrl: string): Promise<string | null> {
 export async function getQrImage(baseUrl: string, key: string): Promise<string | null> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/qr/create?key=${key}&qrimg=true&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${url}/login/qr/create?key=${key}&qrimg=true&timestamp=${Date.now()}`);
         const data = await resp.json();
         return data?.data?.qrimg || null;
     } catch { return null; }
@@ -253,7 +279,7 @@ export async function getQrImage(baseUrl: string, key: string): Promise<string |
 export async function checkQrStatus(baseUrl: string, key: string): Promise<{ code: number; message: string; nickname?: string; cookie?: string }> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/qr/check?key=${key}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${url}/login/qr/check?key=${key}&timestamp=${Date.now()}`);
         const data = await resp.json();
         return { code: data?.code || 0, message: data?.message || "", nickname: data?.profile?.nickname, cookie: data?.cookie };
     } catch (e) {
@@ -265,7 +291,7 @@ export async function checkQrStatus(baseUrl: string, key: string): Promise<{ cod
 export async function checkLoginStatus(baseUrl: string): Promise<{ loggedIn: boolean; nickname?: string }> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/status?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${url}/login/status?timestamp=${Date.now()}`);
         const data = await resp.json();
         const profile = data?.data?.profile;
         if (profile?.nickname) return { loggedIn: true, nickname: profile.nickname };
@@ -288,7 +314,7 @@ async function getLoginUid(): Promise<number | null> {
     const base = neteaseBase();
     if (!base) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/login/status?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/login/status?timestamp=${Date.now()}`);
         const data = await resp.json();
         return data?.data?.profile?.userId || null;
     } catch { return null; }
@@ -301,7 +327,7 @@ export async function getUserPlaylists(): Promise<NeteasePlaylist[]> {
     const uid = await getLoginUid();
     if (!uid) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/user/playlist?uid=${uid}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/user/playlist?uid=${uid}&timestamp=${Date.now()}`);
         const data = await resp.json();
         return (data?.playlist || []).map((p: any) => ({
             id: p.id,
@@ -318,7 +344,7 @@ export async function getPlaylistTracks(playlistId: number): Promise<NeteaseSear
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/track/all?id=${playlistId}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/playlist/track/all?id=${playlistId}&timestamp=${Date.now()}`);
         const data = await resp.json();
         return (data?.songs || []).map(mapSongToSearchResult);
     } catch { return []; }
@@ -328,7 +354,7 @@ export async function getDailyRecommendSongs(): Promise<NeteaseSearchResult[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/recommend/songs?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/recommend/songs?timestamp=${Date.now()}`);
         const data = await resp.json();
         const songs = data?.data?.dailySongs || data?.recommend || [];
         return Array.isArray(songs) ? songs.map(mapSongToSearchResult) : [];
@@ -339,7 +365,7 @@ export async function getPersonalFm(): Promise<NeteaseSearchResult[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/personal_fm?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/personal_fm?timestamp=${Date.now()}`);
         const data = await resp.json();
         const songs = data?.data || [];
         return Array.isArray(songs) ? songs.map(mapSongToSearchResult) : [];
@@ -350,7 +376,7 @@ export async function getPersonalizedPlaylists(limit = 12): Promise<NeteasePlayl
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/personalized?limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/personalized?limit=${limit}&timestamp=${Date.now()}`);
         const data = await resp.json();
         return (data?.result || []).map((p: any) => ({
             id: p.id,
@@ -366,7 +392,7 @@ export async function getRecommendResource(): Promise<NeteasePlaylist[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/recommend/resource?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/recommend/resource?timestamp=${Date.now()}`);
         const data = await resp.json();
         return (data?.recommend || []).map((p: any) => ({
             id: p.id,
@@ -382,7 +408,7 @@ export async function getHotSearchDetail(): Promise<NeteaseHotSearch[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/search/hot/detail?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/search/hot/detail?timestamp=${Date.now()}`);
         const data = await resp.json();
         return (data?.data || []).map((item: any) => ({
             keyword: item.searchWord || item.keyword || "",
@@ -397,7 +423,7 @@ export async function getToplists(): Promise<NeteaseToplist[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/toplist/detail?timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/toplist/detail?timestamp=${Date.now()}`);
         const data = await resp.json();
         return (data?.list || []).map((p: any) => ({
             id: p.id,
@@ -418,7 +444,7 @@ export async function getPlaylistDetail(playlistId: number): Promise<NeteasePlay
     const base = neteaseBase();
     if (!base) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/detail?id=${playlistId}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/playlist/detail?id=${playlistId}&timestamp=${Date.now()}`);
         const data = await resp.json();
         const p = data?.playlist;
         if (!p) return null;
@@ -442,7 +468,7 @@ export async function getSongComments(songId: number, limit = 20): Promise<Netea
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/comment/music?id=${songId}&limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/comment/music?id=${songId}&limit=${limit}&timestamp=${Date.now()}`);
         const data = await resp.json();
         const comments = data?.hotComments?.length ? data.hotComments : data?.comments || [];
         return comments.map((c: any) => ({
@@ -462,7 +488,7 @@ export async function getUserRecord(type: 0 | 1 = 1): Promise<NeteaseSearchResul
     const uid = await getLoginUid();
     if (!uid) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/user/record?uid=${uid}&type=${type}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/user/record?uid=${uid}&type=${type}&timestamp=${Date.now()}`);
         const data = await resp.json();
         const records = data?.weekData || data?.allData || [];
         return Array.isArray(records) ? records.map((r: any) => mapSongToSearchResult(r.song)).filter((s: NeteaseSearchResult) => s.id) : [];
@@ -510,7 +536,7 @@ export async function addTracksToPlaylist(playlistId: number, trackIds: number[]
     const base = neteaseBase();
     if (!base) return { ok: false, message: "API 未配置" };
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/tracks?op=add&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/playlist/tracks?op=add&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`);
         const data = await resp.json();
         if (data?.body?.code === 200 || data?.status === 200 || data?.code === 200) {
             return { ok: true, message: "已添加到歌单" };
@@ -529,7 +555,7 @@ export async function removeTracksFromPlaylist(playlistId: number, trackIds: num
     const base = neteaseBase();
     if (!base) return { ok: false, message: "API 未配置" };
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/tracks?op=del&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`));
+        const resp = await fetchNetease(`${base}/playlist/tracks?op=del&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`);
         const data = await resp.json();
         if (data?.body?.code === 200 || data?.status === 200 || data?.code === 200) {
             return { ok: true, message: "已从歌单移除" };
@@ -544,7 +570,7 @@ export async function removeTracksFromPlaylist(playlistId: number, trackIds: num
 export async function testNeteaseConnection(baseUrl: string): Promise<{ ok: boolean; message: string }> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/search?keywords=test&limit=1`), { signal: AbortSignal.timeout(20000) });
+        const resp = await fetchNetease(`${url}/search?keywords=test&limit=1`, { signal: AbortSignal.timeout(20000) });
         if (!resp.ok) return { ok: false, message: `HTTP ${resp.status}` };
         const data = await resp.json();
         if (data?.result?.songs) return { ok: true, message: "连接成功" };
