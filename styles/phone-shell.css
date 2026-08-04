@@ -400,6 +400,11 @@
   height: calc(var(--slot-icon-height) + (2 * var(--slot-row-step)));
 }
 
+.icon-grid .widget-3x3 {
+  width: calc(var(--slot-icon-width) + (2 * (var(--slot-size) + var(--slot-gap-x))));
+  height: calc(var(--slot-icon-height) + (2 * var(--slot-row-step)));
+}
+
 .icon-grid .widget-4x2 {
   width: calc(var(--slot-icon-width) + var(--slot-size) + var(--slot-gap-x));
   height: calc(var(--slot-icon-height) + (3 * var(--slot-row-step)));
@@ -615,6 +620,11 @@
 .edit-mode .widget-drag-wrap.dragging .widget-glass {
   opacity: 0.25;
   animation: none;
+}
+/* 编辑态下 DIY code 组件的 iframe 放弃指针事件：否则按在 iframe 上的
+   pointerdown 进不了宿主的拖拽处理，组件拖不动 */
+.edit-mode .widget-glass iframe {
+  pointer-events: none;
 }
 /* Dock icons jiggle & drag just like grid icons in edit mode. */
 .dock.edit-mode .dock-item {
