@@ -116,6 +116,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { requestBackgroundChatReply, scheduleFollowUp } from "@/lib/follow-up-service";
 import { CHAT_MESSAGE_NOTICE_EVENT, CHAT_OPEN_SESSION_EVENT, type ChatMessageNoticeDetail } from "@/lib/chat-notification-events";
 import { setMascotContext } from "@/lib/mascot-context";
+import { DESKTOP_WIDGETS_CHANGED_EVENT } from "@/lib/mascot-events";
 import { useWeixinBridge } from "@/lib/use-weixin-bridge";
 import { startWeixinCloudRealtimeSync } from "@/lib/weixin-cloud-sync";
 import { sendBrowserNotification } from "@/lib/browser-notification";
@@ -2865,6 +2866,44 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       return next;
     });
   }
+
+  // 小卷（内置助手）写入组件/DIY 模板后通知桌面重新水合，实现实时热更新。
+  // 拖拽进行中不能换底层数组（会打断 FLIP 和落点计算），先挂起，退出编辑模式后补一次。
+  const mascotWidgetsDirtyRef = useRef(false);
+  useEffect(() => {
+    const reload = () => {
+      if (editDragRef.current?.active || editDragRef.current?.pending) {
+        mascotWidgetsDirtyRef.current = true;
+        return;
+      }
+      setWidgets(loadWidgets());
+    };
+    window.addEventListener(DESKTOP_WIDGETS_CHANGED_EVENT, reload);
+    return () => window.removeEventListener(DESKTOP_WIDGETS_CHANGED_EVENT, reload);
+  }, []);
+  useEffect(() => {
+    if (!editMode && mascotWidgetsDirtyRef.current) {
+      mascotWidgetsDirtyRef.current = false;
+      setWidgets(loadWidgets());
+    }
+  }, [editMode]);
+
+  // DIY code 组件的长按发生在沙箱 iframe 里，宿主收不到指针事件；
+  // 桥接脚本检测到长按后 postMessage，这里代为进入编辑态。
+  // 进入编辑态后 iframe 会放弃指针事件（CSS），后续拖拽走宿主正常链路。
+  useEffect(() => {
+    function handleDiyLongPress(event: MessageEvent) {
+      const data = event.data as { source?: unknown; type?: unknown; widgetId?: unknown } | null;
+      if (!data || typeof data !== "object") return;
+      if (data.source !== "ai-phone-diy-widget" || data.type !== "longPress") return;
+      if (typeof data.widgetId !== "string") return;
+      if (!widgetsRef.current.some((w) => w.id === data.widgetId)) return;
+      setEditMode(true);
+      try { navigator.vibrate?.(30); } catch { /* ignore */ }
+    }
+    window.addEventListener("message", handleDiyLongPress);
+    return () => window.removeEventListener("message", handleDiyLongPress);
+  }, []);
 
   // Build a map of icon skins (icon ID -> data URL) for the theme app preview
   const iconSkinUrls = useMemo(() => {
