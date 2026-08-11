@@ -18,6 +18,7 @@ import MusicFloat from "@/components/music/music-float";
 import MiniAppWindow from "@/components/music/mini-app-window";
 import { PhoneCalendarApp } from "@/components/calendar-app";
 import { PhoneQaApp } from "@/components/phone-qa-app";
+import { ResourceHubApp } from "@/components/resource-hub/resource-hub-app";
 import "@/lib/qa-error-log";
 import { DiaryApp } from "@/components/diary/diary-app";
 import { XiaohongshuApp } from "@/components/xiaohongshu/xiaohongshu-app";
@@ -63,7 +64,9 @@ import {
 import {
   CUSTOM_APPS_UPDATED_EVENT,
   CUSTOM_APP_PLACE_DESKTOP_EVENT,
+  loadCustomAppIconStyles,
   loadInstalledCustomApps,
+  type CustomAppIconStyle,
 } from "@/lib/custom-app-storage";
 import {
   isCustomAppMarketItemNewerThanInstalled,
@@ -84,6 +87,7 @@ import {
   readThemeProfile,
   writeThemeProfile
 } from "@/lib/theme-storage";
+import { THEME_PACKAGE_INSTALLED_EVENT } from "@/lib/theme-package";
 import {
   DEFAULT_THEME_PROFILE,
   DEFAULT_FONT_FAMILY,
@@ -955,6 +959,14 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [notice, setNotice] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
+  // 自定义 APP 桌面图标样式偏好（global = 忽略上传图标走全局效果）
+  const [customAppIconStyles, setCustomAppIconStyles] = useState<Record<string, CustomAppIconStyle>>({});
+  useEffect(() => {
+    const syncIconStyles = () => setCustomAppIconStyles(loadCustomAppIconStyles());
+    syncIconStyles();
+    window.addEventListener(CUSTOM_APPS_UPDATED_EVENT, syncIconStyles);
+    return () => window.removeEventListener(CUSTOM_APPS_UPDATED_EVENT, syncIconStyles);
+  }, []);
   const [customAppUpdatePrompt, setCustomAppUpdatePrompt] = useState<PendingCustomAppUpdatePrompt | null>(null);
   const [customAppUpdateBusy, setCustomAppUpdateBusy] = useState(false);
   const customAppUpdateCheckingRef = useRef<Set<string>>(new Set());
@@ -1396,6 +1408,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
 
   // 其他模块（如工坊 agent 装应用）请求把已安装应用的图标摆上桌面
   const handleInstallCustomAppToDesktopRef = useRef<((app: InstalledCustomApp) => void) | null>(null);
+  const handleThemeDesktopChangeRef = useRef<((next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[] }) => void) | null>(null);
+  const applyThemeRef = useRef<((next: ThemeProfile) => Promise<void>) | null>(null);
   useEffect(() => {
     const placeHandler = (e: Event) => {
       const appId = (e as CustomEvent).detail?.appId;
@@ -1405,6 +1419,21 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     };
     window.addEventListener(CUSTOM_APP_PLACE_DESKTOP_EVENT, placeHandler);
     return () => window.removeEventListener(CUSTOM_APP_PLACE_DESKTOP_EVENT, placeHandler);
+  }, []);
+
+  // 资源集市在 lib 里装完主题包后请桌面刷新。走的落地路径与外观页导入完全一致
+  // （handleThemeDesktopChange + applyTheme），只是入口从 React 回调换成了事件。
+  useEffect(() => {
+    const onThemePackage = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { themeProfile?: ThemeProfile; iconLayout?: DesktopLayout; widgets?: WidgetInstance[]; dock?: DesktopIconId[] }
+        | undefined;
+      if (!detail?.themeProfile || !detail.iconLayout || !detail.widgets) return;
+      handleThemeDesktopChangeRef.current?.({ widgets: detail.widgets, iconLayout: detail.iconLayout, dock: detail.dock });
+      void applyThemeRef.current?.(detail.themeProfile);
+    };
+    window.addEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
+    return () => window.removeEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
   }, []);
 
   useEffect(() => {
@@ -2874,6 +2903,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(normalizedLayout));
   }
 
+  handleThemeDesktopChangeRef.current = handleThemeDesktopChange;
+  applyThemeRef.current = applyTheme;
+
   function handleWidgetConfigChange(widgetId: string, config: Record<string, unknown>): void {
     setWidgets((prev) => {
       const next = prev.map((w) =>
@@ -3374,6 +3406,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     }
     if (activeApp === "qa") {
       return <PhoneQaApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
+    }
+    if (activeApp === "resource_hub") {
+      return <ResourceHubApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
     }
 
     if (activeApp === "diary") {
@@ -3907,7 +3942,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                               const builtinIconId = customApp ? null : icon.id as IconId;
                               const iconSkinId = activeIconSkins[iconId];
                               const iconSkinUrl = iconSkinId ? themeAssets[iconSkinId] ?? null : null;
-                              const customIconUrl = customApp?.iconDataUrl ?? null;
+                              const customIconUrl = customApp && customAppIconStyles[customApp.id] !== "global"
+                                ? customApp.iconDataUrl ?? null
+                                : null;
                               const iconImageUrl = iconSkinUrl || customIconUrl;
                               const hasImageIcon = Boolean(iconImageUrl);
                               const isDragging = dragItem?.type === "icon" && dragItem.id === iconId;
@@ -4045,7 +4082,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     const builtinIconId = customApp ? null : (icon.id as IconId);
                     const iconSkinId = activeIconSkins[iconId];
                     const iconSkinUrl = iconSkinId ? themeAssets[iconSkinId] ?? null : null;
-                    const customIconUrl = customApp?.iconDataUrl ?? null;
+                    const customIconUrl = customApp && customAppIconStyles[customApp.id] !== "global"
+                      ? customApp.iconDataUrl ?? null
+                      : null;
                     const iconImageUrl = iconSkinUrl || customIconUrl;
                     const hasImageIcon = Boolean(iconImageUrl);
                     const isDragging = dragItem?.type === "icon" && dragItem.id === iconId;

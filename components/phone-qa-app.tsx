@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -47,6 +47,11 @@ import {
   QA_DEFAULT_MAX_ROUNDS,
   QA_MAX_ROUNDS_MIN,
   QA_MAX_ROUNDS_MAX,
+  getQaMaxOutputTokens,
+  setQaMaxOutputTokens,
+  QA_DEFAULT_MAX_OUTPUT_TOKENS,
+  QA_MAX_OUTPUT_TOKENS_MIN,
+  QA_MAX_OUTPUT_TOKENS_MAX,
 } from "@/lib/qa-prefs";
 import { resolveQaApiConfig } from "@/lib/qa-agent-engine";
 import {
@@ -217,7 +222,10 @@ function QaToolRow({ tool }: { tool: QaToolStatus }) {
         disabled={!hasDetail}
       >
         {tool.running ? <Loader2 size={13} className="qa-spin" /> : <Wrench size={13} />}
-        <span className="qa-tool-row-summary">{summary}</span>
+        <span className="qa-tool-row-summary">
+          {summary}
+          {tool.subtitle && <span className="qa-tool-row-sub">{tool.subtitle}</span>}
+        </span>
         {hasDetail && <ChevronRight size={14} className={`qa-tool-row-chevron ${open ? "is-open" : ""}`} />}
       </button>
       {open && hasDetail && (
@@ -240,7 +248,47 @@ function QaToolRow({ tool }: { tool: QaToolStatus }) {
   );
 }
 
+// 已完成文本的 Markdown 渲染：memo 缓存——流式期间每次增量都全文重排 remark 是
+// 低端机 WebView OOM 崩溃的主因（几万字 × 每秒多次解析）。文本不变就不重渲。
+const QaMarkdownBlock = memo(function QaMarkdownBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={QA_MARKDOWN_COMPONENTS}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+// 正在生长的活跃段：纯文本渲染（零解析成本），生成结束后换回完整 Markdown
+function QaStreamingText({ text }: { text: string }) {
+  return (
+    <>
+      <div className="qa-stream-text">{text}</div>
+      <span className="qa-cursor" />
+    </>
+  );
+}
+
 function QaMessageItem({ msg, isStreaming, onRetry, onViewImage }: { msg: QaMsg; isStreaming: boolean; onRetry: (id: string) => void; onViewImage: (url: string) => void }) {
+  const thinkingOnly = isStreaming && !msg.content && (!msg.tools || msg.tools.length === 0);
+  // 时序分段渲染：文字与工具行按实际发生顺序交错（连续工具行合并成一组）；
+  // 旧消息没有 segments 时回退「工具在顶、文字在下」布局。
+  // hooks 必须在 user 分支 early-return 之前调用（rules-of-hooks）
+  const segmentBlocks = useMemo(() => {
+    if (!msg.segments?.length) return null;
+    const blocks: Array<{ kind: "text"; text: string } | { kind: "tools"; tools: QaToolStatus[] }> = [];
+    for (const seg of msg.segments) {
+      const last = blocks[blocks.length - 1];
+      if (seg.kind === "tool") {
+        if (last?.kind === "tools") last.tools.push(seg.tool);
+        else blocks.push({ kind: "tools", tools: [seg.tool] });
+      } else if (seg.text.trim()) {
+        if (last?.kind === "text") last.text += seg.text;
+        else blocks.push({ kind: "text", text: seg.text });
+      }
+    }
+    return blocks.length ? blocks : null;
+  }, [msg.segments]);
+
   if (msg.role === "user") {
     return (
       <div className="qa-msg-user-row">
@@ -260,25 +308,47 @@ function QaMessageItem({ msg, isStreaming, onRetry, onViewImage }: { msg: QaMsg;
     );
   }
 
-  const thinkingOnly = isStreaming && !msg.content && (!msg.tools || msg.tools.length === 0);
   return (
     <div className="qa-msg-assistant">
-      {msg.tools && msg.tools.length > 0 && (
-        <div className="qa-tools">
-          {msg.tools.map((tool, i) => (
-            <QaToolRow key={`${tool.name}-${i}`} tool={tool} />
-          ))}
-        </div>
-      )}
-      {thinkingOnly ? (
-        <div className="qa-thinking">{msg.toolDrafting ? "正在编写工具调用…" : msg.reasoning ? "正在思考…" : "正在生成…"}</div>
+      {segmentBlocks ? (
+        segmentBlocks.map((block, i) =>
+          block.kind === "tools" ? (
+            <div className="qa-tools" key={i}>
+              {block.tools.map((tool, j) => (
+                <QaToolRow key={`${tool.name}-${j}`} tool={tool} />
+              ))}
+            </div>
+          ) : isStreaming && i === segmentBlocks.length - 1 ? (
+            <div className="qa-markdown" key={i}>
+              <QaStreamingText text={block.text} />
+            </div>
+          ) : (
+            <div className="qa-markdown" key={i}>
+              <QaMarkdownBlock text={block.text} />
+            </div>
+          ),
+        )
       ) : (
-        <div className="qa-markdown">
-          <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={QA_MARKDOWN_COMPONENTS}>
-            {msg.content}
-          </ReactMarkdown>
-          {isStreaming && <span className="qa-cursor" />}
-        </div>
+        <>
+          {msg.tools && msg.tools.length > 0 && (
+            <div className="qa-tools">
+              {msg.tools.map((tool, i) => (
+                <QaToolRow key={`${tool.name}-${i}`} tool={tool} />
+              ))}
+            </div>
+          )}
+          {thinkingOnly ? (
+            <div className="qa-thinking">{msg.toolDrafting ? "正在编写工具调用…" : msg.reasoning ? "正在思考…" : "正在生成…"}</div>
+          ) : isStreaming ? (
+            <div className="qa-markdown">
+              <QaStreamingText text={msg.content} />
+            </div>
+          ) : (
+            <div className="qa-markdown">
+              <QaMarkdownBlock text={msg.content} />
+            </div>
+          )}
+        </>
       )}
       {isStreaming && msg.toolDrafting && !thinkingOnly && (
         <div className="qa-thinking qa-tool-drafting">正在编写工具调用…</div>
@@ -366,6 +436,10 @@ function QaSettingsSheet({ onClose, onNotice }: { onClose: () => void; onNotice?
   const [budget, setBudget] = useState(() => String(getQaContextBudgetChars()));
   const [pageChars, setPageChars] = useState(() => String(getQaPageChars()));
   const [maxRounds, setMaxRounds] = useState(() => String(getQaMaxRounds()));
+  const [maxOutTokens, setMaxOutTokens] = useState(() => {
+    const v = getQaMaxOutputTokens();
+    return v == null ? "" : String(v);
+  });
   const usedChars = getQaActiveContextChars();
   const pct = Math.round((usedChars / getQaContextBudgetChars()) * 100);
 
@@ -385,9 +459,17 @@ function QaSettingsSheet({ onClose, onNotice }: { onClose: () => void; onNotice?
       onNotice?.(`工具调用上限需为 ${QA_MAX_ROUNDS_MIN} - ${QA_MAX_ROUNDS_MAX} 之间的数字。`);
       return;
     }
+    const trimmedTokens = maxOutTokens.trim();
+    const parsedTokens = trimmedTokens ? Number(trimmedTokens) : null;
+    if (parsedTokens != null && (!Number.isFinite(parsedTokens) || parsedTokens < QA_MAX_OUTPUT_TOKENS_MIN || parsedTokens > QA_MAX_OUTPUT_TOKENS_MAX)) {
+      onNotice?.(`单次最大输出 token 需留空或为 ${QA_MAX_OUTPUT_TOKENS_MIN.toLocaleString()} - ${QA_MAX_OUTPUT_TOKENS_MAX.toLocaleString()} 之间的数字。`);
+      return;
+    }
     setQaContextBudgetChars(parsed);
     setQaPageChars(parsedPage);
     setQaMaxRounds(parsedRounds);
+    // 留空 = 显式不传 max_tokens（0 哨兵），与"没设置用默认值"区分开
+    setQaMaxOutputTokens(trimmedTokens ? parsedTokens : 0);
     onNotice?.("已保存工坊配置。");
     onClose();
   };
@@ -396,9 +478,11 @@ function QaSettingsSheet({ onClose, onNotice }: { onClose: () => void; onNotice?
     setQaContextBudgetChars(null);
     setQaPageChars(null);
     setQaMaxRounds(null);
+    setQaMaxOutputTokens(null);
     setBudget(String(QA_DEFAULT_CONTEXT_BUDGET_CHARS));
     setPageChars(String(QA_DEFAULT_PAGE_CHARS));
     setMaxRounds(String(QA_DEFAULT_MAX_ROUNDS));
+    setMaxOutTokens(String(QA_DEFAULT_MAX_OUTPUT_TOKENS));
     onNotice?.("已恢复默认配置。");
   };
 
@@ -451,6 +535,22 @@ function QaSettingsSheet({ onClose, onNotice }: { onClose: () => void; onNotice?
         </label>
         <div className="qa-settings-hint">
           一次提问里小坊最多连续执行多少轮工具，用完会提示「回复继续」。默认 {QA_DEFAULT_MAX_ROUNDS}；复杂任务（写游戏、改代码）可调大，想控制 token 消耗可调小。
+        </div>
+        <label className="qa-settings-field">
+          <span>单次最大输出 token</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={QA_MAX_OUTPUT_TOKENS_MIN}
+            max={QA_MAX_OUTPUT_TOKENS_MAX}
+            step={1000}
+            placeholder="留空 = 不传"
+            value={maxOutTokens}
+            onChange={(e) => setMaxOutTokens(e.target.value)}
+          />
+        </label>
+        <div className="qa-settings-hint">
+          输出长度护栏：每次请求带 max_tokens，小坊会按该预算分段写大文件，写超被安全截断后自动续接，不再整轮报废。默认 {QA_DEFAULT_MAX_OUTPUT_TOKENS.toLocaleString()}；留空 = 不传该参数（部分模型/中转不支持 max_tokens 时请留空）。
         </div>
         <div className="qa-devnotice-actions is-row">
           <button type="button" className="qa-devnotice-btn" onClick={reset}>恢复默认</button>
