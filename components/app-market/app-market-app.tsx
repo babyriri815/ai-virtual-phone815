@@ -43,6 +43,7 @@ import {
   validateCustomAppMarketItem,
 } from "@/lib/custom-app-market-client";
 import type { CustomAppMarketItem } from "@/lib/custom-app-market-types";
+import { buildMarketItemByAppId, classifyInstalledApp, linkedOwnMarketItem } from "@/lib/custom-app-ownership";
 import {
   applyCustomAppRegistrationsAsync,
   formatCustomAppRegistrationRemovalSummary,
@@ -58,6 +59,9 @@ import {
   normalizeCustomAppManifestId,
   saveInstalledCustomApps,
   uninstallCustomAppAsync,
+  getCustomAppIconStyle,
+  setCustomAppIconStyle,
+  type CustomAppIconStyle,
 } from "@/lib/custom-app-storage";
 import type { CustomAppManifest, CustomAppPermission, CustomAppResourceDeclarations, InstalledCustomApp } from "@/lib/custom-app-types";
 import { createCustomAppPackageFile } from "@/lib/custom-app-package";
@@ -299,6 +303,7 @@ function AppIcon({ iconDataUrl, seed = "", className = "" }: {
 
 export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onNotice, launchContext }: AppMarketAppProps) {
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const repackInputRef = useRef<HTMLInputElement | null>(null);
   const manualLoadSeqRef = useRef(0);
   const consumedLaunchTargetRef = useRef("");
   const [tab, setTab] = useState<AppMarketTab>("discover");
@@ -316,9 +321,8 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
   const [marketEditTarget, setMarketEditTarget] = useState<CustomAppMarketItem | null>(null);
   // 本地测试 APP 的"编辑"目标：保存时按它的运行时 id 原地替换（数据保留，仅本地）
   const [localEditTarget, setLocalEditTarget] = useState<InstalledCustomApp | null>(null);
-  // 本地测试「换包」目标：底部弹窗里选新包，保存后原地替换（仅本地，不影响市场版）
+  // 本地测试「换包」目标：点按钮直接弹系统文件选择器（与已发布换包一致），选完即原地替换（仅本地，不影响市场版）
   const [repackTarget, setRepackTarget] = useState<InstalledCustomApp | null>(null);
-  const [repackFile, setRepackFile] = useState<File | null>(null);
   // 本地测试「发布」来源：置位时检查弹窗只有 取消+发布/提交更新 两键（内容已在本机，无需再选本机测试）
   const [localPublishSource, setLocalPublishSource] = useState<InstalledCustomApp | null>(null);
   const [confirmMarketDelete, setConfirmMarketDelete] = useState<CustomAppMarketItem | null>(null);
@@ -347,25 +351,13 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
   const marketRefreshCountRef = useRef(0);
 
   const installedById = useMemo(() => new Map(apps.map(app => [app.id, app])), [apps]);
-  const marketItemByAppId = useMemo(() => {
-    const map = new Map<string, CustomAppMarketItem>();
-    for (const item of [...marketApps, ...myMarketApps]) {
-      const existing = map.get(item.appId);
-      if (!existing || new Date(item.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) {
-        map.set(item.appId, item);
-      }
-    }
-    return map;
-  }, [marketApps, myMarketApps]);
-  // 找到本机副本对应的自己发布的市场条目：显式标记（marketItemId/运行时 id）优先，
-  // 包内稳定身份（manifest.id、名字）兜底——运行时 id 每次安装会变，兜底让老副本也能对上号。
+  const marketItemByAppId = useMemo(
+    () => buildMarketItemByAppId(marketApps, myMarketApps),
+    [marketApps, myMarketApps],
+  );
+  // 归类与"自己条目"匹配逻辑统一收拢在 lib/custom-app-ownership（小坊版权护栏共用同一实现）
   function linkedMarketItemFor(app: InstalledCustomApp): CustomAppMarketItem | null {
-    const norm = (value: unknown) => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-    return myMarketApps.find(item => item.id === app.marketItemId)
-      ?? myMarketApps.find(item => item.appId === app.id)
-      ?? myMarketApps.find(item => norm(item.manifest?.id) && norm(item.manifest?.id) === norm(app.manifest?.id))
-      ?? myMarketApps.find(item => norm(item.name) === norm(app.name))
-      ?? null;
+    return linkedOwnMarketItem(app, myMarketApps);
   }
 
   // "本地测试"= 创作者的工作副本：纯本地导入的 APP（未上架），加上和自己市场发布关联的副本（已上架，
@@ -375,19 +367,9 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
     if (!marketReady) return [];
     const entries: Array<{ app: InstalledCustomApp; linkedItem: CustomAppMarketItem | null }> = [];
     for (const app of apps) {
-      const linked = linkedMarketItemFor(app);
-      if (app.marketItemId) {
-        // 显式标记：指向自己的条目 → 关联工作副本；指向他人条目（或已失联）→ 不进本地测试
-        if (linked && linked.id === app.marketItemId) entries.push({ app, linkedItem: linked });
-        continue;
-      }
-      // 旧版安装没有 marketItemId 标记:市场安装的运行时 id 等于市场条目的 appId,按此判断来源
-      const fromMarket = marketItemByAppId.get(app.id);
-      if (fromMarket) {
-        if (linked && linked.id === fromMarket.id) entries.push({ app, linkedItem: linked });
-        continue;
-      }
-      entries.push({ app, linkedItem: linked });
+      // others（别人发布、从市场安装的副本）绝不进本地测试——不能对他人内容提供编辑/换包/发布
+      if (classifyInstalledApp(app, { myItems: myMarketApps, itemByAppId: marketItemByAppId }) === "others") continue;
+      entries.push({ app, linkedItem: linkedMarketItemFor(app) });
     }
     return entries;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -469,9 +451,34 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
     void refreshMarket();
   }, []);
 
+  // 云端市场同步失败改为一次性弹窗（同一条错误本次只弹一次），不再常驻横幅——自部署无云端时界面保持干净
+  const dismissedMarketErrorRef = useRef("");
+  useEffect(() => {
+    if (marketError && dismissedMarketErrorRef.current !== marketError) {
+      dismissedMarketErrorRef.current = marketError;
+      setErrorDialog({ title: "云端市场同步失败", message: marketError });
+    }
+  }, [marketError]);
+
   useEffect(() => {
     setInstalledActionError("");
   }, [selectedInstalledApp?.id]);
+
+  // 桌面图标样式编辑（详情弹窗图标下方入口）
+  const [iconStyleEditorOpen, setIconStyleEditorOpen] = useState(false);
+  const [selectedIconStyle, setSelectedIconStyle] = useState<CustomAppIconStyle>("cover");
+  useEffect(() => {
+    setIconStyleEditorOpen(false);
+    if (selectedInstalledApp) setSelectedIconStyle(getCustomAppIconStyle(selectedInstalledApp.id));
+  }, [selectedInstalledApp?.id]);
+
+  function chooseIconStyle(style: CustomAppIconStyle) {
+    if (!selectedInstalledApp) return;
+    setCustomAppIconStyle(selectedInstalledApp.id, style);
+    setSelectedIconStyle(style);
+    setIconStyleEditorOpen(false);
+    onNotice?.(style === "global" ? "桌面图标已改为跟随全局样式" : "桌面图标已恢复为上传图标");
+  }
 
   useEffect(() => {
     const targetId = typeof launchContext?.selectedInstalledAppId === "string"
@@ -534,6 +541,21 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
       onNotice?.(`已导出「${app.name}」安装包`);
     } catch (err) {
       showErrorDialog(err, "导出失败");
+    }
+  }
+
+  // 已发布 APP 直接导出安装包：拉线上包还原后打包下载，不经过编辑器
+  async function exportMarketApp(item: CustomAppMarketItem) {
+    setBusy(true);
+    try {
+      const app = await loadCustomAppMarketPackageApp(item);
+      const file = await createCustomAppPackageFile(app);
+      await downloadFile(file, file.name);
+      onNotice?.(`已导出「${item.name}」安装包`);
+    } catch (err) {
+      showErrorDialog(err, "导出失败");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -623,44 +645,37 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
     setPendingApp(app);
   }
 
-  // 本地测试「换包」：底部弹窗选新包，保存后按原运行时 id 原地替换（数据、桌面图标都在，仅本地），
-  // 不走"新安装"那套 id 逻辑，避免误替换别的同名 APP。
-  function openRepackSheet(app: InstalledCustomApp) {
+  // 本地测试「换包」：与已发布换包一致，点按钮直接弹系统文件选择器，选完即按原
+  // 运行时 id 原地替换（数据、桌面图标都在，仅本地）——不走"新安装"那套 id 逻辑，
+  // 避免误替换别的同名 APP。
+  function startRepack(app: InstalledCustomApp) {
     setRepackTarget(app);
-    setRepackFile(null);
+    repackInputRef.current?.click();
   }
 
-  function closeRepackSheet() {
-    if (busy) return;
-    setRepackTarget(null);
-    setRepackFile(null);
-  }
-
-  async function confirmRepack() {
-    if (!repackTarget || !repackFile) return;
+  async function confirmRepack(target: InstalledCustomApp, file: File) {
     setBusy(true);
     try {
-      const lower = repackFile.name.toLowerCase();
+      const lower = file.name.toLowerCase();
       const loaded = lower.endsWith(".html") || lower.endsWith(".htm")
-        ? await loadSingleHtmlCustomApp(repackFile)
-        : await loadCustomAppPackage(repackFile);
-      const linked = linkedMarketItemFor(repackTarget);
+        ? await loadSingleHtmlCustomApp(file)
+        : await loadCustomAppPackage(file);
+      const linked = linkedMarketItemFor(target);
       const replaced: InstalledCustomApp = {
         ...loaded,
-        id: repackTarget.id,
-        installedAt: repackTarget.installedAt,
-        marketItemId: linked?.id ?? repackTarget.marketItemId,
+        id: target.id,
+        installedAt: target.installedAt,
+        marketItemId: linked?.id ?? target.marketItemId,
         hasUnpublishedChanges: linked ? true : undefined,
       };
       const installed = await installApp(replaced);
       if (installed) {
-        setRepackTarget(null);
-        setRepackFile(null);
         setSelectedInstalledApp(current => (current && current.id === installed.id ? installed : current));
       }
     } catch (err) {
       showErrorDialog(err, "换包失败");
     } finally {
+      setRepackTarget(null);
       setBusy(false);
     }
   }
@@ -1091,6 +1106,17 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
           className="app-market-hidden-input"
           onChange={event => void handleFile(event.target.files?.[0])}
         />
+        <input
+          ref={repackInputRef}
+          type="file"
+          accept=".zip,.html,.htm,.floatapp,application/zip,application/x-zip-compressed,text/html"
+          className="app-market-hidden-input"
+          onChange={event => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file && repackTarget) void confirmRepack(repackTarget, file);
+          }}
+        />
 
         {tab === "discover" ? (
           <>
@@ -1098,8 +1124,6 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
               <Search size={16} />
               <input aria-label="搜索 APP" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索应用或作者" />
             </label>
-
-            {marketError ? <div className="app-market-error" role="alert">{marketError}</div> : null}
 
             <section className="app-market-section">
               {filteredMarketApps.length === 0 ? (
@@ -1280,7 +1304,7 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
                             <Pencil size={14} />
                             <span>编辑</span>
                           </button>
-                          <button type="button" className="am-action-chip" onClick={() => openRepackSheet(app)} disabled={busy} aria-label={`换包更新${app.name}`}>
+                          <button type="button" className="am-action-chip" onClick={() => startRepack(app)} disabled={busy} aria-label={`换包更新${app.name}`}>
                             <Upload size={16} />
                             <span>换包</span>
                           </button>
@@ -1518,7 +1542,19 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
             </div>
             <div className="app-market-sheet-body">
               <div className="app-market-preview-row">
-                <AppIcon iconDataUrl={selectedInstalledApp.iconDataUrl} seed={selectedInstalledApp.name} className="large" />
+                <div className="am-installed-icon-col">
+                  <AppIcon
+                    iconDataUrl={selectedIconStyle === "global" ? undefined : selectedInstalledApp.iconDataUrl}
+                    seed={selectedInstalledApp.name}
+                    className="large"
+                  />
+                  {selectedInstalledApp.iconDataUrl ? (
+                    <button type="button" className="am-icon-style-edit" onClick={() => setIconStyleEditorOpen(true)}>
+                      <Pencil size={11} />
+                      图标样式
+                    </button>
+                  ) : null}
+                </div>
                 <div>
                   <strong>{selectedInstalledApp.name}</strong>
                   <p>{selectedInstalledApp.description || "本地自定义 APP"}</p>
@@ -1582,6 +1618,17 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
               <strong>{marketEditTarget ? `编辑「${marketEditTarget.name}」` : localEditTarget ? `编辑「${localEditTarget.name}」（本地）` : "单文件逐项上传"}</strong>
               {localEditTarget ? (
                 <button type="button" onClick={() => void exportLocalApp(localEditTarget)} aria-label={`导出${localEditTarget.name}安装包`} title="导出安装包（zip，可发给别人导入）" disabled={busy}>
+                  <Download size={18} />
+                </button>
+              ) : null}
+              {marketEditTarget ? (
+                <button
+                  type="button"
+                  onClick={() => manualExistingApp ? void exportLocalApp(manualExistingApp) : void exportMarketApp(marketEditTarget)}
+                  aria-label={`导出${marketEditTarget.name}安装包`}
+                  title="导出安装包（zip，可发给别人导入）"
+                  disabled={busy || manualExistingLoading}
+                >
                   <Download size={18} />
                 </button>
               ) : null}
@@ -1694,41 +1741,6 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
         </div>
       ) : null}
 
-      {repackTarget ? (
-        <div className="app-market-overlay app-market-drawer-overlay" role="presentation" onClick={closeRepackSheet}>
-          <div className="app-market-sheet" role="dialog" aria-modal="true" aria-label="换包" onClick={event => event.stopPropagation()}>
-            <div className="app-market-sheet-head">
-              <strong>换包「{repackTarget.name}」</strong>
-              <button type="button" onClick={closeRepackSheet} aria-label="关闭" disabled={busy}>
-                <X size={20} />
-              </button>
-            </div>
-            <div className="app-market-sheet-body">
-              <p className="app-market-upload-hint">
-                选择新的应用包，保存后原地替换本机版：沿用原有数据和桌面图标，仅改本地，不影响市场版。
-              </p>
-              <label className="am-file-pick am-file-pick-wide" data-active={Boolean(repackFile)}>
-                <Upload size={18} />
-                <span>应用包</span>
-                <input
-                  type="file"
-                  accept=".zip,.html,.htm,.floatapp,application/zip,application/x-zip-compressed,text/html"
-                  onChange={event => setRepackFile(event.target.files?.[0] ?? null)}
-                />
-                <em>{repackFile ? repackFile.name : "选择 .zip 或 .html 新包"}</em>
-              </label>
-              <div className="app-market-sheet-actions">
-                <button type="button" className="app-market-secondary" onClick={closeRepackSheet} disabled={busy}>取消</button>
-                <button type="button" className="app-market-primary" onClick={() => void confirmRepack()} disabled={busy || !repackFile}>
-                  {busy ? <LoaderCircle className="am-spin" size={18} /> : <PackageCheck size={18} />}
-                  <span>{busy ? "保存中" : "保存"}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {confirmDelete ? (
         <div className="app-market-overlay" role="presentation" onClick={() => setConfirmDelete(null)}>
           <div className="app-market-sheet" role="dialog" aria-modal="true" aria-label="卸载 APP" onClick={event => event.stopPropagation()}>
@@ -1751,6 +1763,42 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
                 </button>
                 <button type="button" className="app-market-secondary" onClick={() => setConfirmDelete(null)}>
                   取消
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {iconStyleEditorOpen && selectedInstalledApp ? (
+        <div className="app-market-overlay app-market-center-overlay" role="presentation" onClick={() => setIconStyleEditorOpen(false)}>
+          <div className="app-market-sheet app-market-confirm-sheet am-icon-style-sheet" role="dialog" aria-modal="true" aria-label="桌面图标样式" onClick={event => event.stopPropagation()}>
+            <div className="app-market-sheet-head">
+              <strong>桌面图标样式</strong>
+              <button type="button" onClick={() => setIconStyleEditorOpen(false)} aria-label="关闭">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="app-market-sheet-body">
+              <p className="app-market-upload-hint">选择「{selectedInstalledApp.name}」在桌面上的图标显示方式，随时可以改回来。</p>
+              <div className="am-icon-style-options">
+                <button
+                  type="button"
+                  data-active={selectedIconStyle === "cover" ? "true" : undefined}
+                  onClick={() => chooseIconStyle("cover")}
+                >
+                  <AppIcon iconDataUrl={selectedInstalledApp.iconDataUrl} seed={selectedInstalledApp.name} className="large" />
+                  <strong>使用当前图标</strong>
+                  <span>上传的图标铺满图标格</span>
+                </button>
+                <button
+                  type="button"
+                  data-active={selectedIconStyle === "global" ? "true" : undefined}
+                  onClick={() => chooseIconStyle("global")}
+                >
+                  <AppIcon seed={selectedInstalledApp.name} className="large" />
+                  <strong>跟随全局图标</strong>
+                  <span>生成字形，套用全局图标效果（毛玻璃等）</span>
                 </button>
               </div>
             </div>
