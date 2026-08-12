@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, createContext, type CSSProperties, type ReactNode } from "react";
-import { Check, ChevronRight, Clock, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, KeyRound, Layers, Link2, Loader2, LogOut, MessageSquare, Mic, SlidersHorizontal, UserCircle, Wrench, X } from "lucide-react";
+import { Check, ChevronRight, Clock, Cloud, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, KeyRound, Layers, Link2, Loader2, LogOut, MessageSquare, Mic, SlidersHorizontal, UserCircle, Wrench, X } from "lucide-react";
 import { ConfirmDialog } from "./ui/modal";
 import { useAccount } from "@/lib/account-context";
 import { changeAccountPassword } from "@/lib/account-client";
@@ -18,6 +18,7 @@ import { BindingManager } from "./settings/binding-manager";
 import { WeixinSettings } from "./settings/weixin-settings";
 import { ToolboxSettings } from "./settings/toolbox-settings";
 import { ModerationCenter } from "./settings/moderation-center";
+import { OfflineMessagesSettings } from "./settings/offline-messages-settings";
 import { fetchIsAdmin } from "@/lib/moderation-client";
 import { isSelfHostedModeEnabled } from "@/lib/self-hosting";
 import { PageShell } from "./ui/page-shell";
@@ -50,6 +51,7 @@ type SubPage =
     | "identity"
     | "weixin"
     | "toolbox"
+    | "offlineMessages"
     | "moderation"
     | "about";
 
@@ -64,6 +66,7 @@ const SETTINGS_MENU = [
     { id: "binding", icon: Link2, label: "配置绑定", desc: "管理全局默认、角色与应用的配置绑定关系", iconColor: BINDING_ACCENTS.identity },
     { id: "weixin", icon: MessageSquare, label: "微信接入", desc: "iLink Bot", iconColor: CONTENT_APP_ACCENTS.chat },
     { id: "toolbox", icon: Wrench, label: "聊天工具箱", desc: "外部工具调用", iconColor: BINDING_ACCENTS.voice },
+    { id: "offlineMessages", icon: Cloud, label: "离线主动消息", desc: "Cloudflare 背景排程与手机推播", iconColor: CONTENT_APP_ACCENTS.chat },
     { id: "identity", icon: UserCircle, label: "用户身份", desc: "个人信息", iconColor: BINDING_ACCENTS.identity },
     { id: "about", icon: Info, label: "关于与声明", desc: "版本与协议", iconColor: BINDING_ACCENTS.memory },
 ] as const;
@@ -261,6 +264,8 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                 return <WeixinSettings onOpenDataManagement={() => setCurrentPage("data")} />;
             case "toolbox":
                 return <ToolboxSettings />;
+            case "offlineMessages":
+                return <OfflineMessagesSettings onNotice={onNotice} />;
             case "moderation":
                 return <ModerationCenter onNotice={onNotice} />;
             case "identity":
@@ -354,7 +359,7 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                         <CardGrid
                             label="Connections"
                             labelClassName="settings-menu-section-title"
-                            items={SETTINGS_MENU.filter(item => ["weixin", "toolbox"].includes(item.id)).map(makeCardItem)}
+                            items={SETTINGS_MENU.filter(item => ["weixin", "toolbox", "offlineMessages"].includes(item.id)).map(makeCardItem)}
                         />
                         <div className="settings-realtime-section">
                             <h3 className="settings-menu-section-title">Realtime</h3>

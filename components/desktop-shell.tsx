@@ -5,6 +5,7 @@ import { Component, memo, useCallback, useEffect, useInsertionEffect, useLayoutE
 import { updateStatusBarTone } from "@/lib/bg-tone";
 import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/diary-entry-timer-service";
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
+import { startOfflineMessagesRuntime } from "@/lib/offline-messages/runtime";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
 import { bgTimerCleanup } from "@/lib/bg-timer";
 import { PhoneThemeApp } from "@/components/phone-theme-app";
@@ -1574,6 +1575,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     let cancelled = false;
     let servicesStarted = false;
     let cleanupWeixinCloudRealtimeSync: (() => void) | null = null;
+    let cleanupOfflineMessages: (() => void) | null = null;
 
     void (async () => {
       try {
@@ -1607,6 +1609,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       startFollowUpService();
       startMomentsService();
       startDiaryEntryTimerService();
+      cleanupOfflineMessages = startOfflineMessagesRuntime();
       const stopWeixinCloudRealtimeSync = startWeixinCloudRealtimeSync();
       servicesStarted = true;
       cleanupWeixinCloudRealtimeSync = stopWeixinCloudRealtimeSync;
@@ -1615,6 +1618,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     return () => {
       cancelled = true;
       cleanupWeixinCloudRealtimeSync?.();
+      cleanupOfflineMessages?.();
       if (servicesStarted) {
         stopFollowUpService();
         stopMomentsService();
