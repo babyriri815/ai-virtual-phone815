@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "node --max-old-space-size=4096 scripts/local-next-server.mjs --dev",
-    "build": "node scripts/build-weixin-assistant-dist.mjs && next build && node scripts/restore-backdrop-filter.mjs",
+    "build": "node scripts/build-offline-messages.mjs && node scripts/build-weixin-assistant-dist.mjs && next build && node scripts/restore-backdrop-filter.mjs",
     "start": "node scripts/local-next-server.mjs --prod",
     "lint": "next lint",
     "check:sdk": "node scripts/check-custom-app-sdk-consistency.mjs",
@@ -21,6 +21,8 @@
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.5.0",
     "@react-three/postprocessing": "^3.0.4",
+    "@rei-standard/amsg-client": "^2.9.0-next.11",
+    "@rei-standard/amsg-sw": "^2.4.0-next.3",
     "@supabase/realtime-js": "^2.110.7",
     "@types/three": "^0.183.1",
     "d3-delaunay": "^6.0.4",
@@ -45,6 +47,7 @@
   "devDependencies": {
     "@gltf-transform/core": "^4.3.0",
     "@gltf-transform/extensions": "^4.3.0",
+    "@rei-standard/amsg-server": "^2.6.0-next.20",
     "@tailwindcss/postcss": "^4.2.1",
     "@types/d3-delaunay": "^6.0.4",
     "@types/dompurify": "^3.0.5",
@@ -52,6 +55,7 @@
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "esbuild": "^0.25.9",
     "eslint": "^9.17.0",
     "eslint-config-next": "^15.1.0",
     "tailwindcss": "^4.2.1",

@@ -71,6 +71,12 @@ const periodCareFiringSet = new Set<string>();
 const backgroundReplyFiringSet = new Set<string>();
 let lastPeriodCarePollAt = 0;
 
+function cancelCloudSchedule(sessionId: string) {
+    void import("./offline-messages/runtime")
+        .then(({ cancelCloudFollowUp }) => cancelCloudFollowUp(sessionId))
+        .catch(error => console.warn("[FollowUp] Cloud cancel skipped:", error));
+}
+
 // ── Public API ─────────────────────────────────────────────
 
 export function startFollowUpService() {
@@ -102,6 +108,7 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
     if (!stateValues || stateValues.length === 0) {
         console.log(`[FollowUp] No state values, not scheduling.`);
         clearFollowUpSchedule(sessionId);
+        cancelCloudSchedule(sessionId);
         return;
     }
 
@@ -109,12 +116,14 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
     if (!anxietyEntry) {
         console.log(`[FollowUp] No "${config.anxietyFieldName}" field found, not scheduling.`);
         clearFollowUpSchedule(sessionId);
+        cancelCloudSchedule(sessionId);
         return;
     }
 
     if (anxietyEntry.value < config.anxietyThreshold) {
         console.log(`[FollowUp] Anxiety ${anxietyEntry.value} < threshold ${config.anxietyThreshold}, not scheduling.`);
         clearFollowUpSchedule(sessionId);
+        cancelCloudSchedule(sessionId);
         return;
     }
 
@@ -125,6 +134,9 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
     const fireAt = Date.now() + delaySec * 1000;
     console.log(`[FollowUp] Anxiety-driven: value=${anxietyEntry.value}, delay=${delaySec}s, session=${sessionId}, count=${count}`);
     saveFollowUpSchedule({ sessionId, fireAt, count, delaySec });
+    void import("./offline-messages/runtime")
+        .then(({ scheduleCloudFollowUp }) => scheduleCloudFollowUp(sessionId))
+        .catch(error => console.warn("[FollowUp] Cloud schedule failed; keeping local fallback:", error));
 }
 
 export async function requestBackgroundChatReply(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
@@ -171,6 +183,7 @@ export async function requestBackgroundChatReply(sessionId: string): Promise<{ o
 /** Cancel any pending follow-up for a session (called when user sends a message). */
 export function cancelFollowUp(sessionId: string) {
     clearFollowUpSchedule(sessionId);
+    cancelCloudSchedule(sessionId);
     // If an API call is already in-flight, mark it for cancellation
     if (firingSet.has(sessionId)) {
         cancelledWhileFiring.add(sessionId);
