@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, createContext, type CSSProperties, type ReactNode } from "react";
-import { Check, ChevronRight, Clock, Cloud, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, KeyRound, Layers, Link2, Loader2, LogOut, MessageSquare, Mic, SlidersHorizontal, UserCircle, Wrench, X } from "lucide-react";
+import { Activity, Check, ChevronRight, Clock, Cloud, CloudUpload, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, KeyRound, Laptop, Layers, Link2, Loader2, LogOut, MessageSquare, Mic, SlidersHorizontal, UserCircle, Wrench, X } from "lucide-react";
 import { ConfirmDialog } from "./ui/modal";
 import { useAccount } from "@/lib/account-context";
+import { isSelfHostedModeEnabled } from "@/lib/self-hosting";
 import { changeAccountPassword } from "@/lib/account-client";
 import { ApiSettings } from "./settings/api-settings";
 import { VoiceSettings } from "./settings/voice-settings";
@@ -16,15 +17,18 @@ import { UserIdentitySettings } from "./settings/user-identity";
 import { AboutDeclaration } from "./settings/about-declaration";
 import { BindingManager } from "./settings/binding-manager";
 import { WeixinSettings } from "./settings/weixin-settings";
+import { CloudServicesPage } from "./settings/cloud-services-setup";
 import { ToolboxSettings } from "./settings/toolbox-settings";
 import { ModerationCenter } from "./settings/moderation-center";
 import { OfflineMessagesSettings } from "./settings/offline-messages-settings";
+import { AgentComputerSettings } from "./settings/agent-computer-settings";
 import { fetchIsAdmin } from "@/lib/moderation-client";
-import { isSelfHostedModeEnabled } from "@/lib/self-hosting";
 import { PageShell } from "./ui/page-shell";
 import { CardGrid, FeaturedCard, type CardItem, type FeaturedCardItem } from "./ui/card-grid";
+import { GlassIcon } from "./ui/glass-icon";
 import { Toggle } from "./ui/form";
 import { loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
+import { loadKeepAlive, saveKeepAlive } from "@/lib/weixin-storage";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 
 export const SettingsContext = createContext<{
@@ -49,30 +53,38 @@ type SubPage =
     | "data"
     | "binding"
     | "identity"
+    | "cloud"
     | "weixin"
     | "toolbox"
     | "offlineMessages"
+    | "agentComputer"
     | "moderation"
     | "about";
 
 const SETTINGS_MENU = [
-    { id: "api", icon: HardDrive, label: "API 设置", desc: "大模型接口", iconColor: BINDING_ACCENTS.api },
-    { id: "voice", icon: Mic, label: "语音 API", desc: "语音合成", iconColor: BINDING_ACCENTS.voice },
-    { id: "imageGeneration", icon: Image, label: "图像生成 API", desc: "模型、参考图与提示词", iconColor: CONTENT_APP_ACCENTS.moments },
-    { id: "presets", icon: Fingerprint, label: "预设", desc: "角色预设", iconColor: BINDING_ACCENTS.preset },
-    { id: "worldbook", icon: Globe, label: "世界书", desc: "世界观设定", iconColor: BINDING_ACCENTS.worldBook },
-    { id: "regex", icon: Database, label: "正则规则", desc: "文本替换", iconColor: BINDING_ACCENTS.regex },
-    { id: "data", icon: Layers, label: "数据管理", desc: "导入导出", iconColor: BINDING_ACCENTS.api },
-    { id: "binding", icon: Link2, label: "配置绑定", desc: "管理全局默认、角色与应用的配置绑定关系", iconColor: BINDING_ACCENTS.identity },
-    { id: "weixin", icon: MessageSquare, label: "微信接入", desc: "iLink Bot", iconColor: CONTENT_APP_ACCENTS.chat },
-    { id: "toolbox", icon: Wrench, label: "聊天工具箱", desc: "外部工具调用", iconColor: BINDING_ACCENTS.voice },
-    { id: "offlineMessages", icon: Cloud, label: "离线主动消息", desc: "Cloudflare 背景排程与手机推播", iconColor: CONTENT_APP_ACCENTS.chat },
-    { id: "identity", icon: UserCircle, label: "用户身份", desc: "个人信息", iconColor: BINDING_ACCENTS.identity },
-    { id: "about", icon: Info, label: "关于与声明", desc: "版本与协议", iconColor: BINDING_ACCENTS.memory },
+    { id: "api", icon: HardDrive, label: "API 设置", desc: "大模型接口", iconColor: BINDING_ACCENTS.api , glass: "api" },
+    { id: "voice", icon: Mic, label: "语音 API", desc: "语音合成", iconColor: BINDING_ACCENTS.voice , glass: "voice" },
+    { id: "imageGeneration", icon: Image, label: "图像生成 API", desc: "模型、参考图与提示词", iconColor: CONTENT_APP_ACCENTS.moments , glass: "image-generation" },
+    { id: "presets", icon: Fingerprint, label: "预设", desc: "角色预设", iconColor: BINDING_ACCENTS.preset , glass: "presets" },
+    { id: "worldbook", icon: Globe, label: "世界书", desc: "世界观设定", iconColor: BINDING_ACCENTS.worldBook , glass: "worldbook" },
+    { id: "regex", icon: Database, label: "正则规则", desc: "文本替换", iconColor: BINDING_ACCENTS.regex , glass: "regex" },
+    { id: "data", icon: Layers, label: "数据管理", desc: "导入导出", iconColor: BINDING_ACCENTS.api , glass: "data" },
+    { id: "binding", icon: Link2, label: "配置绑定", desc: "管理全局默认、角色与应用的配置绑定关系", iconColor: BINDING_ACCENTS.identity , glass: "binding" },
+    { id: "cloud", icon: CloudUpload, label: "云服务部署", desc: "备份 / 微信 / 推送一站配置", iconColor: BINDING_ACCENTS.api , glass: "" },
+    { id: "weixin", icon: MessageSquare, label: "微信接入", desc: "iLink Bot", iconColor: CONTENT_APP_ACCENTS.chat , glass: "weixin" },
+    { id: "toolbox", icon: Wrench, label: "聊天工具箱", desc: "外部工具调用", iconColor: BINDING_ACCENTS.voice , glass: "toolbox" },
+    { id: "offlineMessages", icon: Cloud, label: "离线主动消息", desc: "Cloudflare 背景排程与手机推播", iconColor: CONTENT_APP_ACCENTS.chat, glass: "" },
+    { id: "agentComputer", icon: Laptop, label: "角色电脑", desc: "云端小电脑（自部署）", iconColor: BINDING_ACCENTS.memory , glass: "agent-computer" },
+    { id: "identity", icon: UserCircle, label: "用户身份", desc: "个人信息", iconColor: BINDING_ACCENTS.identity , glass: "identity" },
+    { id: "about", icon: Info, label: "关于与声明", desc: "版本与协议", iconColor: BINDING_ACCENTS.memory , glass: "about" },
 ] as const;
 
 const realtimeIconStyle = {
     "--icon-color": CONTENT_APP_ACCENTS.calendar,
+} as CSSProperties;
+
+const keepAliveIconStyle = {
+    "--icon-color": CONTENT_APP_ACCENTS.chat,
 } as CSSProperties;
 
 const promptViewerIconStyle = {
@@ -103,6 +115,8 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
     const [timeAware, setTimeAware] = useState(true);
     const [promptViewerEnabled, setPromptViewerEnabled] = useState(false);
     const [quickActionEnabled, setQuickActionEnabled] = useState(false);
+    const [keepAlive, setKeepAlive] = useState(false);
+    // 角色电脑：施工中弹窗（返回 / 仍要看看）
     const pageBodyRef = useRef<HTMLDivElement | null>(null);
 
     // ── 账号：显示当前登录 / 修改密码 / 退出登录 ──
@@ -201,7 +215,11 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
         label: item.label,
         desc: item.desc,
         iconColor: item.iconColor,
-        onClick: () => setCurrentPage(item.id as SubPage),
+        glassIcon: item.glass,
+        onClick: () => {
+            // 施工中：角色电脑先弹提示，可选择仍要看看
+            setCurrentPage(item.id as SubPage);
+        },
     });
 
     const handleTimeAwareChange = useCallback((next: boolean) => {
@@ -222,6 +240,14 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
         onNotice(next ? "已开启快捷操作" : "已关闭快捷操作");
     }, [onNotice]);
 
+    const handleKeepAliveChange = useCallback((next: boolean) => {
+        setKeepAlive(next);
+        saveKeepAlive(next);
+        // use-weixin-bridge 监听这个事件来起停保活（与微信 Bot 的启用状态无关）
+        window.dispatchEvent(new CustomEvent("weixin-config-changed"));
+        onNotice(next ? "已开启后台保活" : "已关闭后台保活");
+    }, [onNotice]);
+
     const imageGenerationItem = SETTINGS_MENU.find(i => i.id === "imageGeneration")!;
     const imageGenerationFeaturedItem: FeaturedCardItem = {
         id: imageGenerationItem.id,
@@ -229,7 +255,29 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
         label: imageGenerationItem.label,
         desc: imageGenerationItem.desc,
         iconColor: imageGenerationItem.iconColor,
+        glassIcon: imageGenerationItem.glass,
         onClick: () => setCurrentPage("imageGeneration"),
+    };
+
+    const cloudItem = SETTINGS_MENU.find(i => i.id === "cloud")!;
+    const cloudFeaturedItem: FeaturedCardItem = {
+        id: cloudItem.id,
+        icon: cloudItem.icon,
+        label: cloudItem.label,
+        desc: cloudItem.desc,
+        iconColor: cloudItem.iconColor,
+        onClick: () => setCurrentPage("cloud"),
+    };
+
+    const agentComputerItem = SETTINGS_MENU.find(i => i.id === "agentComputer")!;
+    const agentComputerFeaturedItem: FeaturedCardItem = {
+        id: agentComputerItem.id,
+        icon: agentComputerItem.icon,
+        label: agentComputerItem.label,
+        desc: agentComputerItem.desc,
+        iconColor: agentComputerItem.iconColor,
+        glassIcon: agentComputerItem.glass,
+        onClick: () => setCurrentPage("agentComputer"),
     };
 
     const bindingItem = SETTINGS_MENU.find(i => i.id === "binding")!;
@@ -239,6 +287,7 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
         label: bindingItem.label,
         desc: bindingItem.desc,
         iconColor: bindingItem.iconColor,
+        glassIcon: bindingItem.glass,
         onClick: () => setCurrentPage("binding"),
     };
 
@@ -260,12 +309,16 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                 return <DataManagement onNotice={onNotice} />;
             case "binding":
                 return <BindingManager />;
+            case "cloud":
+                return <CloudServicesPage />;
             case "weixin":
-                return <WeixinSettings onOpenDataManagement={() => setCurrentPage("data")} />;
+                return <WeixinSettings onOpenCloudServices={() => setCurrentPage("cloud")} />;
             case "toolbox":
                 return <ToolboxSettings />;
             case "offlineMessages":
                 return <OfflineMessagesSettings onNotice={onNotice} />;
+            case "agentComputer":
+                return <AgentComputerSettings onNotice={onNotice} />;
             case "moderation":
                 return <ModerationCenter onNotice={onNotice} />;
             case "identity":
@@ -297,6 +350,7 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
         setTimeAware(settings.timeAware !== false);
         setPromptViewerEnabled(settings.promptViewerEnabled === true);
         setQuickActionEnabled(settings.quickActionEnabled === true);
+        setKeepAlive(loadKeepAlive());
     }, []);
 
     // Listen for mascot navigation mode (e.g. jump to worldbook/regex tab)
@@ -328,7 +382,7 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                     <div className="page-menu settings-main-menu">
                         {!selfHostedMode && (
                             <button type="button" className="settings-account-card" onClick={() => setAccountSheetOpen(true)}>
-                                <span className="settings-account-avatar">{account.username.slice(0, 1).toUpperCase()}</span>
+                                <span className="settings-account-avatar"><GlassIcon name="account" /></span>
                                 <span className="settings-account-copy">
                                     <span className="settings-account-name">{account.displayName || account.username}</span>
                                     <span className="settings-account-sub">账号、密码与登录</span>
@@ -356,16 +410,25 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                                 <FeaturedCard item={imageGenerationFeaturedItem} />
                             </div>
                         </div>
-                        <CardGrid
-                            label="Connections"
-                            labelClassName="settings-menu-section-title"
-                            items={SETTINGS_MENU.filter(item => ["weixin", "toolbox", "offlineMessages"].includes(item.id)).map(makeCardItem)}
-                        />
+                        <div>
+                            <h3 className="settings-menu-section-title">Connections</h3>
+                            <div className="mt-[10px]">
+                                <FeaturedCard item={cloudFeaturedItem} />
+                            </div>
+                            <div className="mt-[10px]">
+                                <CardGrid
+                                    items={SETTINGS_MENU.filter(item => ["weixin", "toolbox", "offlineMessages"].includes(item.id)).map(makeCardItem)}
+                                />
+                            </div>
+                            <div className="mt-[10px]">
+                                <FeaturedCard item={agentComputerFeaturedItem} />
+                            </div>
+                        </div>
                         <div className="settings-realtime-section">
-                            <h3 className="settings-menu-section-title">Realtime</h3>
+                            <h3 className="settings-menu-section-title">Runtime</h3>
                             <div className="app-card card-featured settings-toggle-card">
-                                <span className="card-icon" style={realtimeIconStyle}>
-                                    <Clock size={22} strokeWidth={1.75} />
+                                <span className="card-icon card-icon-glass">
+                                    <GlassIcon name="time-aware" />
                                 </span>
                                 <div className="card-featured-body">
                                     <div className="card-featured-label">真实时间感知</div>
@@ -373,13 +436,23 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                                 </div>
                                 <Toggle checked={timeAware} onChange={handleTimeAwareChange} className="settings-toggle-control" />
                             </div>
+                            <div className="app-card card-featured settings-toggle-card">
+                                <span className="card-icon card-icon-glass">
+                                    <GlassIcon name="keep-alive" />
+                                </span>
+                                <div className="card-featured-body">
+                                    <div className="card-featured-label">后台保活</div>
+                                    <div className="card-featured-desc">切到后台时尽量保持网页运行，主动消息与轮询不中断</div>
+                                </div>
+                                <Toggle checked={keepAlive} onChange={handleKeepAliveChange} className="settings-toggle-control" />
+                            </div>
                         </div>
                         {isAdmin ? (
                             <div className="settings-moderation-section">
                                 <h3 className="settings-menu-section-title">Moderation</h3>
                                 <div className="app-card card-featured settings-toggle-card" role="button" tabIndex={0} style={{ cursor: "pointer" }} onClick={() => setCurrentPage("moderation")}>
-                                    <span className="card-icon" style={accountIconStyle}>
-                                        <SlidersHorizontal size={22} strokeWidth={1.75} />
+                                    <span className="card-icon card-icon-glass">
+                                        <GlassIcon name="moderation" />
                                     </span>
                                     <div className="card-featured-body">
                                         <div className="card-featured-label">管理中心</div>
@@ -393,8 +466,8 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                             <h3 className="settings-menu-section-title">Tools</h3>
                             <div className="menu-group settings-tools-menu">
                                 <div className="menu-item settings-tools-menu-item">
-                                    <span className="card-icon" style={promptViewerIconStyle}>
-                                        <FileText size={22} strokeWidth={1.75} />
+                                    <span className="card-icon card-icon-glass">
+                                        <GlassIcon name="prompt-viewer" />
                                     </span>
                                     <span className="settings-tools-menu-copy">
                                         <span className="menu-label appearance-menu-item-label">提示词查看器</span>
@@ -405,8 +478,8 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                                     </span>
                                 </div>
                                 <div className="menu-item settings-tools-menu-item">
-                                    <span className="card-icon" style={quickActionIconStyle}>
-                                        <SlidersHorizontal size={22} strokeWidth={1.75} />
+                                    <span className="card-icon card-icon-glass">
+                                        <GlassIcon name="quick-action" />
                                     </span>
                                     <span className="settings-tools-menu-copy">
                                         <span className="menu-label appearance-menu-item-label">快捷操作</span>
@@ -511,7 +584,10 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                 )}
 
                 {currentPage !== "main" && (
-                    <div className="block min-h-full p-4 pb-8 box-border">
+                    // shrink-0：page-body 是 flex 容器，包裹层默认可压缩——内容超一屏时会被压到
+                    // 恰好一屏高、卡片从中溢出，底部 padding 落不到内容末尾，最后一张卡贴死滚动边界
+                    //（iOS 底部工具栏/安全区一盖就"没放下又滚不动"）。尾部留白 = 原 pb-8 + 安全区。
+                    <div className="block min-h-full shrink-0 p-4 box-border" style={{ paddingBottom: "calc(32px + env(safe-area-inset-bottom, 0px))" }}>
                         {renderSubPage()}
                     </div>
                 )}

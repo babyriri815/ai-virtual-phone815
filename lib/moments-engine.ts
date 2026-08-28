@@ -1213,6 +1213,44 @@ export function parseMomentPostResponse(rawText: string): {
 
 // ── Helpers ──
 
+/**
+ * 生图后台任务：帖子已先入库（photoGenerationStatus: "pending"），图片生成完再补挂。
+ * 失败/超时/中断只把状态标为 failed（卡片上可手动重试），绝不影响帖子本身。
+ */
+export function attachMomentPhotoInBackground(
+    postId: string,
+    description: string,
+    characterId: string,
+    useReferenceImage: boolean,
+    signal?: AbortSignal,
+): void {
+    void (async () => {
+        let photoUrl: string | undefined;
+        let errorMessage: string | undefined;
+        let aborted = false;
+        try {
+            photoUrl = await generateMomentPhotoUrl(description, characterId, useReferenceImage, signal);
+        } catch (error) {
+            aborted = isAbortError(error);
+            errorMessage = error instanceof Error ? error.message : String(error);
+        }
+        const reason = errorMessage || "生图配置未启用或生成失败";
+        updateMomentPost(postId, photoUrl
+            ? { photoUrl, photoGenerationStatus: "generated", photoGenerationError: undefined }
+            : { photoGenerationStatus: "failed", photoGenerationError: reason });
+        dispatchMomentsUpdated();
+        // 失败时只在当下弹一次提示（卡片上不再挂红字），中断不算失败
+        if (!photoUrl && !aborted) dispatchMomentPhotoGenerationFailed(reason);
+    })();
+}
+
+export const MOMENT_PHOTO_GENERATION_FAILED_EVENT = "moment-photo-generation-failed";
+
+function dispatchMomentPhotoGenerationFailed(message: string): void {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new CustomEvent(MOMENT_PHOTO_GENERATION_FAILED_EVENT, { detail: { message } }));
+}
+
 export async function generateMomentPhotoUrl(
     description: string,
     characterId: string,

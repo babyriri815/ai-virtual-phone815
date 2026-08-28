@@ -2,7 +2,7 @@ import { build } from "esbuild";
 
 await Promise.all([
   build({
-    entryPoints: ["workers/float-service-worker.js"],
+    entryPoints: ["workers/float-service-worker-unified.js"],
     outfile: "public/sw.js",
     bundle: true,
     format: "iife",
