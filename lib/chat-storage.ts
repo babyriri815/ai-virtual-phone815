@@ -1,6 +1,7 @@
 // lib/chat-storage.ts
 
 import {
+    chatDb,
     initChatDb,
     dbPutMessage, dbDeleteMessage, dbDeleteMessagesBySession, dbDeleteMessagesByIds,
     dbPutMessages, dbPutSessions, dbPutContacts, dbDeleteSession,
@@ -224,6 +225,7 @@ export type ChatMessage = {
     };
     isTyping?: boolean; // temporary flag for UI rendering
     statusPanel?: string; // AI display-only status content from [状态栏] tags
+    statusRegionMode?: "custom"; // 该消息生成时会话处于自定义状态栏模式（缺省=原生渲染）
     innerMonologue?: string; // AI inner monologue content from [内心] tags
     reasoningText?: string; // 模型思维链（reasoning/CoT）内容，挂在回复批次的第一条气泡上
     stateValues?: StateValue[]; // parsed character state values from inner monologue
@@ -241,6 +243,8 @@ export type ChatMessage = {
         externalId?: string;
         direction?: "inbound" | "outbound" | "local";
         syncedAt?: string;
+        /** 云端主动回复对应的本地触发消息，用于跨时钟因果排序。 */
+        replyAfterLocalMessageId?: string;
     };
     // Group chat fields
     senderCharacterId?: string; // which character sent this assistant message in a group chat
@@ -254,12 +258,23 @@ export type ChatAppSettings = {
     quickActionEnabled?: boolean; // When true, show the floating quick action entry
     browserNotificationsEnabled?: boolean; // When true, send browser Notification API alerts when page is hidden
     enterToSendEnabled?: boolean; // When true, Enter sends chat input and Shift+Enter inserts a newline
+    callVibrationEnabled?: boolean; // 语音/视频来电等待接听时循环振动（默认开；iOS 网页不支持振动则无效果）
+    maxToolRounds?: number; // 单条消息的工具循环轮数上限（默认 5；每轮=一次模型请求，轮内调用条数不限）
 };
+
+/** 单条消息工具循环轮数上限（默认 5，夹在 1–20 之间） */
+export function getMaxToolRounds(): number {
+    const raw = loadChatAppSettings().maxToolRounds;
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return 5;
+    return Math.max(1, Math.min(20, Math.round(raw)));
+}
 
 export const CHAT_APP_SETTINGS_UPDATED_EVENT = "chat-app-settings-updated";
 export const CHAT_MESSAGE_PUSHED_EVENT = "chat-message-pushed";
 export const CHAT_MESSAGES_DELETED_EVENT = "chat-messages-deleted";
 export const CHAT_REQUEST_REPLY_EVENT = "chat-request-reply";
+/** 长按编辑整批回复后重建消息：携带新消息与编辑后的原文，供云同步回写。 */
+export const CHAT_RESPONSE_BATCH_REPLACED_EVENT = "chat-response-batch-replaced";
 
 // ── Media Preview Map ─────────────────────────
 const MEDIA_PREVIEW_MAP: Record<string, string> = {
@@ -652,12 +667,55 @@ function normalizeChatSessions(sessions: ChatSession[]): NormalizedSessionList {
     return { items: normalized, changed, redirects };
 }
 
+// ── 用户主动删除的好友（墓碑）────────────────────────
+// 删好友是「删联系人、留会话」——会话留着，重新加回来才能接上历史记录。
+// 但下面的 restoreContactsForPrivateSessions 是条数据抢救逻辑：它看到
+// 「有会话却没联系人」就认定联系人表丢了，照着会话把联系人重建回来，
+// 于是刚删掉的好友立刻复活。这里把用户的主动删除记一笔，让抢救逻辑跳过
+// 它们；重新加好友时 addChatContact 会自动销掉墓碑。
+const REMOVED_CONTACTS_KEY = "ai_phone_removed_contacts_v1";
+registerKvMigration(REMOVED_CONTACTS_KEY);
+
+function loadRemovedContactIds(): Set<string> {
+    if (typeof window === "undefined") return new Set<string>();
+    try {
+        const raw = kvGet(REMOVED_CONTACTS_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        const ids: string[] = Array.isArray(parsed) ? parsed.filter((id: unknown): id is string => typeof id === "string" && !!id) : [];
+        return new Set<string>(ids);
+    } catch {
+        return new Set<string>();
+    }
+}
+
+function saveRemovedContactIds(ids: Set<string>): void {
+    if (typeof window === "undefined") return;
+    kvSet(REMOVED_CONTACTS_KEY, JSON.stringify([...ids]));
+}
+
+function markContactRemoved(characterId: string): void {
+    if (!characterId) return;
+    const ids = loadRemovedContactIds();
+    if (ids.has(characterId)) return;
+    ids.add(characterId);
+    saveRemovedContactIds(ids);
+}
+
+function unmarkContactRemoved(characterId: string): void {
+    if (!characterId) return;
+    const ids = loadRemovedContactIds();
+    if (!ids.delete(characterId)) return;
+    saveRemovedContactIds(ids);
+}
+
 function restoreContactsForPrivateSessions(contacts: ChatContact[], sessions: ChatSession[]): NormalizedList<ChatContact> {
     const characterIds = new Set(loadCharacters().map(character => character.id));
+    const removedByUser = loadRemovedContactIds();
     const privateSessionsWithMessages = sessions.filter(session =>
         !session.isGroup
         && session.contactId
         && characterIds.has(session.contactId)
+        && !removedByUser.has(session.contactId)
         && Boolean(getLastVisibleSessionMessage(session.id))
     );
     if (privateSessionsWithMessages.length === 0 || contacts.length >= privateSessionsWithMessages.length) {
@@ -936,6 +994,9 @@ export function saveChatContacts(contacts: ChatContact[]) {
 }
 
 export function addChatContact(characterId: string): ChatContact | null {
+    // 任何一条"重新加上好友"的路径都会走到这里（通过好友申请、搜索添加、
+    // 后台引擎重新建联系），统一在这里解除删除状态，不会漏。
+    unmarkContactRemoved(characterId);
     const contacts = loadChatContacts();
     if (contacts.find(c => c.characterId === characterId)) return null; // already exists
 
@@ -951,6 +1012,7 @@ export function addChatContact(characterId: string): ChatContact | null {
 export function removeChatContact(characterId: string) {
     const contacts = loadChatContacts();
     saveChatContacts(contacts.filter(c => c.characterId !== characterId));
+    markContactRemoved(characterId);
 }
 
 // ── CRUD for Sessions ─────────────────────────
@@ -1029,6 +1091,23 @@ export function deleteChatSession(sessionId: string) {
     clearChatSessionMessages(sessionId); // Cleanup associated messages
 }
 
+// 把一个会话的全部消息挪到另一个会话名下（重复会话合并用）。
+// 两边的 order 序号各自从 0 起，直接混排会串位，挪完后按时间重排目标会话。
+export function reassignChatSessionMessages(fromSessionId: string, toSessionId: string): number {
+    if (fromSessionId === toSessionId) return 0;
+    const changed: ChatMessage[] = [];
+    _messagesCache = _messagesCache.map(message => {
+        if (message.sessionId !== fromSessionId) return message;
+        const updated = { ...message, sessionId: toSessionId };
+        changed.push(updated);
+        return updated;
+    });
+    if (changed.length === 0) return 0;
+    dbPutMessages(changed);
+    reindexSessionMessageOrdersByTime(toSessionId);
+    return changed.length;
+}
+
 // ── CRUD for Messages ─────────────────────────
 export function loadChatMessages(sessionId: string, limit?: number): ChatMessage[] {
     const all = getSortedSessionMessages(sessionId);
@@ -1052,11 +1131,14 @@ export function createToolExecutionId(): string {
     return `toolrun_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & { status?: ChatMessageStatus }): ChatMessage {
+export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & {
+    status?: ChatMessageStatus;
+    createdAt?: string;
+}): ChatMessage {
     let newMsg: ChatMessage = {
         ...msg,
         id: createMessageId(),
-        createdAt: new Date().toISOString(),
+        createdAt: msg.createdAt || new Date().toISOString(),
         order: getNextMessageOrder(msg.sessionId),
         status: msg.status || "sent"
     };
@@ -1653,6 +1735,41 @@ export function updateMessageMediaUrl(messageId: string, mediaUrl: string) {
     }
 }
 
+/**
+ * 语音合成结果落库：优先走内存缓存（当前会话可见时同步生效）；缓存里没有
+ * （合成期间用户已切走会话）就直接读库改库——合成一次的音频绝不能丢，
+ * 丢了就是下一次白花钱的重新合成。
+ */
+export async function persistMessageVoiceAudio(
+    messageId: string,
+    mediaUrl: string,
+    synthesizedFromText: string,
+): Promise<void> {
+    const idx = _messagesCache.findIndex(m => m.id === messageId);
+    if (idx !== -1) {
+        const next = {
+            ..._messagesCache[idx],
+            mediaUrl,
+            mediaData: { ..._messagesCache[idx].mediaData, synthesizedFromText },
+        };
+        _messagesCache[idx] = next;
+        dbPutMessage(next);
+        return;
+    }
+    try {
+        const stored = await chatDb.messages.get(messageId);
+        if (stored) {
+            await chatDb.messages.put({
+                ...stored,
+                mediaUrl,
+                mediaData: { ...stored.mediaData, synthesizedFromText },
+            });
+        }
+    } catch (err) {
+        console.warn("[ChatDB] persist voice audio failed:", err);
+    }
+}
+
 export function updateChatMessage(
     messageId: string,
     patch: Partial<Pick<ChatMessage, "content" | "mediaType" | "mediaUrl" | "mediaData">>,
@@ -1802,6 +1919,7 @@ export function replaceResponseBatchWithParts(
     parts: { content: string; mediaType?: ChatMessage["mediaType"]; mediaData?: ChatMessage["mediaData"] }[],
     options?: {
         statusPanel?: string;
+        statusRegionMode?: "custom";
         innerMonologue?: string;
         reasoningText?: string;
         stateValues?: StateValue[];
@@ -1843,7 +1961,11 @@ export function replaceResponseBatchWithParts(
         rawResponseText,
         responseRoundId: firstMessage.responseRoundId,
         editableResponseText: firstMessage.editableResponseText,
+        // 云消息身份必须跟着走：丢了它，微信云同步下一轮会把原文当成「还没导入过」
+        // 再导一遍，编辑后的版本和原文并存（编辑一次多一条）。
+        cloudSync: firstMessage.cloudSync,
         statusPanel: index === (options?.metaPartIndex ?? 0) ? options?.statusPanel : undefined,
+        statusRegionMode: index === (options?.metaPartIndex ?? 0) && options?.statusPanel ? options?.statusRegionMode : undefined,
         innerMonologue: index === (options?.metaPartIndex ?? 0) ? options?.innerMonologue : undefined,
         reasoningText: index === (options?.metaPartIndex ?? 0) ? options?.reasoningText : undefined,
         stateValues: index === (options?.metaPartIndex ?? 0) ? options?.stateValues : undefined,
@@ -1866,6 +1988,7 @@ export function replaceResponseBatchWithParts(
             responseBatchId,
             responseRoundId: firstMessage.responseRoundId,
             editableResponseText: firstMessage.editableResponseText,
+            cloudSync: firstMessage.cloudSync,
             followUpIndex: firstMessage.followUpIndex,
             senderCharacterId: firstMessage.senderCharacterId,
             senderName: firstMessage.senderName,
@@ -1892,7 +2015,20 @@ export function replaceResponseBatchWithParts(
         saveChatSessions(sessions);
     }
 
+    dispatchResponseBatchReplaced(sessionId, newMessages, rawResponseText);
     return newMessages;
+}
+
+/**
+ * 整批回复被编辑重建：这里不能走 CHAT_MESSAGE_PUSHED / CHAT_MESSAGES_DELETED
+ * （前者会被当成新消息新建云端对象，后者会把云端原件删掉），所以单独发一个事件，
+ * 由云同步侧「就地覆盖同一条云消息」。
+ */
+function dispatchResponseBatchReplaced(sessionId: string, messages: ChatMessage[], rawResponseText: string): void {
+    if (typeof window === "undefined" || messages.length === 0) return;
+    window.dispatchEvent(new CustomEvent(CHAT_RESPONSE_BATCH_REPLACED_EVENT, {
+        detail: { sessionId, messages, rawResponseText },
+    }));
 }
 
 export function replaceGroupResponseRound(
@@ -1906,6 +2042,7 @@ export function replaceGroupResponseRound(
         rawResponseText?: string;
         responseBatchId?: string;
         statusPanel?: string;
+        statusRegionMode?: "custom";
         innerMonologue?: string;
         reasoningText?: string;
         stateValues?: StateValue[];
@@ -1946,7 +2083,9 @@ export function replaceGroupResponseRound(
         rawResponseText: msg.rawResponseText,
         responseRoundId,
         editableResponseText,
+        cloudSync: firstMessage.cloudSync,
         statusPanel: msg.statusPanel,
+        statusRegionMode: msg.statusRegionMode,
         innerMonologue: msg.innerMonologue,
         reasoningText: msg.reasoningText,
         stateValues: msg.stateValues,
