@@ -1198,7 +1198,9 @@ export function parseMomentPostResponse(rawText: string): {
     const referenceDirective = explicitPhotoMatch?.[1] ?? "";
     const photoUseReferenceImage = explicitPhotoMatch
         ? !referenceDirective.startsWith("不使用")
-        : false;
+        : legacyPhotoMatch
+            ? /(?:自拍|对镜拍|selfie)/i.test(photoDescription || "")
+            : false;
 
     const content = text
         .replace(/\[照片[:：]\s*(?:使用|不使用)(?:参考图|參考圖)\s*[:：]\s*[\s\S]*?\]/g, "")
